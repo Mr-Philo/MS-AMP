@@ -160,3 +160,25 @@ class LinearTestCase(unittest.TestCase):
         output1 = model1(input)
         output2 = model2(input)
         self.assertTrue(torch.equal(output1, output2))
+        
+    @decorator.cuda_test
+    def test_activation_fp8(self):
+        """Test activation FP8Linear."""
+        input = torch.randn((4, 4), device='cuda')
+        linear = torch.nn.Linear(4, 8).cuda()
+        
+        # for standard comparison
+        model1 = LinearReplacer.replace(linear, Dtypes.kfloat16)
+        output1 = model1(input)
+        print(f"fp16 model output: {output1}, with dtype: {output1.dtype}")
+        
+        print("------------For fp8 activation model------------")        
+        model2 = LinearReplacer.replace(linear, Dtypes.kfloat16, enabling_fp8_activation=True)
+        input = input.cast(Dtypes.kfloat8_e4m3, meta=model2.scaling_metas['input'])
+        input.requires_grad = True
+        print(f"input: {input}, with dtype: {input.dtype}")
+        
+        output = model2(input)
+        print(f"output: {output}, with dtype: {output.dtype}")
+        
+        # python -m unittest tests.nn.test_linear.LinearTestCase.test_activation_fp8

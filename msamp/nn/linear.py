@@ -16,7 +16,7 @@ class FP8Linear(ScalingModule):
     DEFAULT_WINDOW_SIZE = 16
     DEFAULT_WGRAD_WINDOW_SIZE = 1
 
-    def __init__(self, in_features, out_features, use_bias=True, weight_qtype=Dtypes.kfloat16, bias_type=torch.float32):
+    def __init__(self, in_features, out_features, use_bias=True, weight_qtype=Dtypes.kfloat16, bias_type=torch.float32, enabling_fp8_activation=False):
         """Constructor.
 
         Args:
@@ -25,6 +25,7 @@ class FP8Linear(ScalingModule):
             use_bias (bool): Whether to use bias. Defaults to True.
             weight_qtype (Dtypes.QType): qtype of weight. Defaults to Dtypes.kfloat16.
             bias_type (torch.dtype): dtype of bias. Defaults to torch.float32.
+            enabling_fp8_activation (bool): Whether to enable FP8 activation. Defaults to False.
         """
         super().__init__()
         self.in_features = in_features
@@ -46,17 +47,19 @@ class FP8Linear(ScalingModule):
             ograd=ScalingMeta(Dtypes.kfloat8_e5m2, window_size=FP8Linear.DEFAULT_WINDOW_SIZE)
         )
         self.weight._scaling_metas = self.scaling_metas
+        
+        self.enabling_fp8_activation = enabling_fp8_activation
 
     def forward(self, input):
         """Forward function.
 
         Args:
-            input (torch.Tensor): Input tensor.
+            input (torch.Tensor or ScalingTensor if self.enabling_fp8_activation=True): Input tensor.
 
         Returns:
-            torch.Tensor: Output tensor.
+            torch.Tensor (or ScalingTensor if self.enabling_fp8_activation=True): Output tensor.
         """
-        return F.linear(input, self.weight, bias=self.bias)
+        return F.linear(input, self.weight, bias=self.bias, enabling_fp8_activation=self.enabling_fp8_activation)
 
     def extra_repr(self):
         """Return the extra representation of this module."""
@@ -69,12 +72,13 @@ class LinearReplacer:
     """A class to replace torch.nn.Linear with FP8Linear."""
     @staticmethod
     @torch.no_grad()
-    def _build_fp8linear(linear, weight_qtype):
+    def _build_fp8linear(linear, weight_qtype, enabling_fp8_activation=False):
         """Build FP8Linear from torch.nn.Linear.
 
         Args:
             linear (torch.nn.Linear): Linear module.
             weight_qtype (Dtypes.QType): Qtype of weight.
+            enabling_fp8_activation (bool): Whether to enable FP8 activation. Defaults to False.
 
         Returns:
             FP8Linear: FP8Linear module.
@@ -87,7 +91,8 @@ class LinearReplacer:
             out_features=linear.out_features,
             use_bias=linear.bias is not None,
             weight_qtype=weight_qtype,
-            bias_type=bias_dtype
+            bias_type=bias_dtype,
+            enabling_fp8_activation=enabling_fp8_activation
         ).cuda()
 
         linear = linear.cuda()
@@ -139,12 +144,13 @@ class LinearReplacer:
         return x_diff_y, y_diff_x
 
     @classmethod
-    def _replace(cls, model, weight_qtype):
+    def _replace(cls, model, weight_qtype, enabling_fp8_activation=False):
         """Replace torch.nn.Linear with FP8Linear recursively in a model.
 
         Args:
             model (torch.nn.Module): Model to replace.
             weight_qtype (Dtypes.QType): Qtype of weight.
+            enabling_fp8_activation (bool): Whether to enable FP8 activation. Defaults to False.
 
         Returns:
             model (torch.nn.Module): Model in which all Linear modules are replaced with FP8Linear.
@@ -152,7 +158,7 @@ class LinearReplacer:
         if isinstance(model, torch.nn.Linear):
             if getattr(model, 'use_fp32_linear', False):
                 return model
-            fp8_net = cls._build_fp8linear(model, weight_qtype)
+            fp8_net = cls._build_fp8linear(model, weight_qtype, enabling_fp8_activation)
             return fp8_net
         else:
             for child_name, child in list(model.named_children()):
@@ -160,7 +166,7 @@ class LinearReplacer:
         return model
 
     @classmethod
-    def replace(cls, model, weight_qtype=Dtypes.kfloat16, src_rank=0, group=None):
+    def replace(cls, model, weight_qtype=Dtypes.kfloat16, src_rank=0, group=None, enabling_fp8_activation=False):
         """Replace torch.nn.Linear with FP8Linear in a model.
 
         Besides replace linear modules, it also broadcasts weights and register scaling data to model state.
@@ -170,11 +176,12 @@ class LinearReplacer:
             weight_qtype (Dtypes.QType, optional): Qtype of weight. Defaults to kfloat16.
             src_rank (int, optional): Source rank of broadcast. Defaults to 0.
             group (torch.distributed.ProcessGroup, optional): Group of broadcast. Defaults to None.
+            enabling_fp8_activation (bool, optional): Whether to enable FP8 activation. Defaults to False.
 
         Return:
             model (torch.nn.Module): Model in which all Linear modules are replaced with FP8Linear.
         """
-        model = cls._replace(model, weight_qtype)
+        model = cls._replace(model, weight_qtype, enabling_fp8_activation)
         fp8_named_weights = [(k, p) for k, p in model.named_parameters() if isinstance(p, ScalingParameter)]
 
         fp8_weights = [p for _, p in fp8_named_weights]

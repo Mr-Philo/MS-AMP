@@ -41,8 +41,17 @@ class _FP8GemmFunction(torch.autograd.Function):
 
         ctx.metas = metas
         model_state.check_metas_in_flat(metas)
-        input_meta = metas['input']
-        input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta)
+        
+        if isinstance(input, torch.Tensor):
+            input_meta = metas['input']
+            input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta)
+            # print(f">>> In _FP8GemmFunction.forward, intime quantization: input: {input_fp8}")    #! temporary
+        elif isinstance(input, ScalingTensor):
+            input_fp8 = input
+            # print(f">>> In _FP8GemmFunction.forward, pre quantization: input: {input_fp8}")       #! temporary
+        else:
+            raise ValueError(f'input should be either torch.Tensor or ScalingTensor, but got {type(input)}')
+        
         weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
 
         ctx.input_fp8 = input_fp8
@@ -137,8 +146,8 @@ class FunctionalOverider:
     @classmethod
     def _get_wrapper_for_linear(cls, old_fn):
         """Get wrapper for torch.nn.functional.linear (F.linear)."""
-        def new_fn(input, weight, bias=None):
-            r"""linear(input, weight, bias=None) -> Tensor.
+        def new_fn(input, weight, bias=None, enabling_fp8_activation=False):
+            r"""linear(input, weight, bias=None, enabling_fp8_activation=False) -> Tensor (or ScalingTensor).
 
             Applies a linear transformation to the incoming data: :math:`y = xA^T + b`.
 
@@ -159,14 +168,17 @@ class FunctionalOverider:
                 - Bias (Tensor or None): :math:`(out\_features)` or :math:`()`
                 - Output (Tensor): :math:`(*, out\_features)` or :math:`(*)`, based on the shape of the weight
             """
-            if not isinstance(input, torch.Tensor):
-                raise TypeError(f'input should be a torch.Tensor. current type: {type(input)}')
+            if not enabling_fp8_activation and not isinstance(input, torch.Tensor):
+                if not isinstance(input, ScalingTensor):
+                    raise TypeError(f'input should be a torch.Tensor. current type: {type(input)}')
+                else:
+                    raise ValueError('enabling_fp8_activation should be True when input is ScalingTensor.')
             if not isinstance(weight, (torch.Tensor, ScalingTensor)):
                 raise TypeError(f'weight should be a torch.Tensor or ScalingTensor. current type: {type(weight)}')
             if bias is not None and not isinstance(bias, torch.Tensor):
-                raise TypeError(f'bias should be a torch.Tensor. current type: {type(bias)}')
+                raise TypeError(f'bias should be a torch.Tensor. current type: {type(bias)}')       # todo: how do we check if bias is a ScalingTensor?
 
-            if isinstance(weight, torch.Tensor) and not hasattr(weight, '_meta'):
+            if isinstance(weight, torch.Tensor) and isinstance(input, torch.Tensor) and not hasattr(weight, '_meta'):
                 return old_fn(input, weight, bias=bias)
 
             if not hasattr(weight, '_scaling_metas'):
@@ -179,13 +191,31 @@ class FunctionalOverider:
                 dim = shape[-1]
                 input = input.reshape(-1, dim)
 
-            output_dtype = torch.get_autocast_gpu_dtype() if torch.is_autocast_enabled() else input.dtype
+            # todo: output_dtype when enabling_fp8_activation is True
+            if isinstance(input, ScalingTensor):
+                output_dtype = torch.float16        # todo: very temporary solution
+                '''
+                Comments on 2024/04/25: if set output_dtype to ScalingTensor.dtypr(torch.uint8), the following error occurs:
+                File "/data/ruizhe/MS-AMP/msamp/operators/gemm/gemm.py", line 122, in fp8_gemm
+                    tew.te_gemm(
+                File "/data/ruizhe/MS-AMP/msamp/common/utils/transformer_engine_wrapper.py", line 103, in te_gemm
+                    tex.te_gemm(*new_args)
+                RuntimeError: /tmp/pip-install-478citbx/transformer-engine_6eacb10b216149648b925ccd4cfcbcaa/transformer_engine/common/gemm/cublaslt_gemm.cu:267 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm
+                '''
+            else:
+                output_dtype = torch.get_autocast_gpu_dtype() if torch.is_autocast_enabled() else input.dtype
+            # print(f">>> In FuctionalOverider._get_wrapper_for_linear, input: {input}")    #! temporary
+            
             out = _FP8GemmFunction.apply(input, weight, weight._scaling_metas, cls.EMPTY_GRAD_TENSOR.type(output_dtype))
             if bias is not None:
                 out = out + bias.type(output_dtype).view(1, -1)
 
             if len(shape) != 2:
                 out = out.view(shape[:-1] + (-1, ))
+                
+            if enabling_fp8_activation:
+                out = out.cast(Dtypes.kfloat8_e4m3, meta=weight._scaling_metas['ograd'])
+                
             return out
 
         return new_fn
