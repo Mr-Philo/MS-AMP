@@ -9,8 +9,14 @@ import transformer_engine_extensions as tex
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 
-from msamp.common.tensor import ScalingTensor
+from msamp.common.dtype import Dtypes
+from msamp.common.tensor import ScalingTensor, ScalingMeta, TypeCast
 from msamp.nn import ScalingModule
+
+from typing import Union, Optional, Callable, Tuple, List, Dict, Any
+
+DEVELOPER_SET_FP8_ACT = True
+SIMU_FP8_ACT = True
 
 # set the function `untyped_storage` for TransformerEngine
 if not hasattr(torch.Tensor, 'untyped_storage'):
@@ -28,6 +34,10 @@ def set_activation_dtype(self, inp):
     if torch.is_autocast_enabled():
         self.activation_dtype = torch.get_autocast_gpu_dtype()
         return
+    
+    # if self.if_fp8_activation:
+    #     self.activation_dtype = tex.DType.kFloat8E4M3
+    #     return
 
     # All checks after this have already been performed once, thus skip
     # We assume that user doesn't change input types across iterations
@@ -130,17 +140,135 @@ class MSAMPTransformerEngineBaseModule:
 
 class MSAMPLinear(MSAMPTransformerEngineBaseModule, te.Linear, ScalingModule):
     """MS-AMP Linear module."""
-    pass
+    def __init__(self, *args, if_fp8_activation=False, **kwargs):
+        """Init MSAMPLinear.
+
+        Args:
+            if_fp8_activation (bool): Whether to use FP8 activation.
+        """
+        super().__init__(*args, **kwargs)
+        self.if_fp8_activation = if_fp8_activation
+        
+    def forward(
+        self,
+        inp: torch.Tensor,
+        is_first_microbatch: Optional[bool] = None,
+    ):
+        """Forward function.
+
+        Args:
+            inp (torch.Tensor or ScalingTensor): Input tensor.
+            is_first_microbatch (bool, optional): Whether this is the first microbatch. Coincides with the te.Linear input param.
+
+        Returns:
+            torch.Tensor or ScalingTensor: Output tensor.
+        """
+        
+        #! manually disabled
+        # if DEVELOPER_SET_FP8_ACT:
+        #     self.if_fp8_activation = True
+            
+        if self.if_fp8_activation:
+            qtype = Dtypes.dtype_to_qtype[inp.dtype]
+            meta = ScalingMeta(Dtypes.kfloat8_e4m3)
+            inp_casted = TypeCast.cast_to_fp8(inp, meta)
+            
+            if SIMU_FP8_ACT:
+                inp_casted = TypeCast.cast_from_fp8(inp_casted, meta, qtype)
+                return super().forward(inp_casted, is_first_microbatch=is_first_microbatch)
+            else:   # TODO - fix bug
+                out = super().forward(inp_casted, is_first_microbatch=is_first_microbatch)
+                return TypeCast.cast_from_fp8(out, meta, qtype)
+        else:
+            return super().forward(inp, is_first_microbatch=is_first_microbatch)
 
 
 class MSAMPLayerNormLinear(MSAMPTransformerEngineBaseModule, te.LayerNormLinear, ScalingModule):
     """MS-AMP LayerNormLinear module."""
-    pass
+    def __init__(self, *args, if_fp8_activation=False, **kwargs):
+        """Init MSAMPLayerNormLinear.
+
+        Args:
+            if_fp8_activation (bool): Whether to use FP8 activation.
+        """
+        super().__init__(*args, **kwargs)
+        self.if_fp8_activation = if_fp8_activation
+        
+    def forward(
+        self,
+        inp: torch.Tensor,
+        is_first_microbatch: Optional[bool] = None,
+    ):
+        """Forward function.
+
+        Args:
+            inp (torch.Tensor or ScalingTensor): Input tensor.
+            is_first_microbatch (bool, optional): Whether this is the first microbatch. Coincides with the te.LayerNormLinear input param.
+
+        Returns:
+            torch.Tensor or ScalingTensor: Output tensor.
+        """
+        
+        #! manually disabled
+        if DEVELOPER_SET_FP8_ACT:
+            self.if_fp8_activation = True
+            
+        if self.if_fp8_activation:
+            qtype = Dtypes.dtype_to_qtype[inp.dtype]
+            meta = ScalingMeta(Dtypes.kfloat8_e4m3)
+            inp_casted = TypeCast.cast_to_fp8(inp, meta)
+            if SIMU_FP8_ACT:
+                inp_casted = TypeCast.cast_from_fp8(inp_casted, meta, qtype)
+                return super().forward(inp_casted, is_first_microbatch=is_first_microbatch)
+            else:   # TODO - fix bug
+                out = super().forward(inp_casted, is_first_microbatch=is_first_microbatch)
+                return TypeCast.cast_from_fp8(out, meta, qtype)
+        else:
+            return super().forward(inp, is_first_microbatch=is_first_microbatch)
 
 
 class MSAMPLayerNormMLP(MSAMPTransformerEngineBaseModule, te.LayerNormMLP, ScalingModule):
     """MS-AMP LayerNormMLP module."""
-    pass
+    def __init__(self, *args, if_fp8_activation=False, **kwargs):
+        """Init MSAMPLayerNormMLP.
+
+        Args:
+            if_fp8_activation (bool): Whether to use FP8 activation.
+        """
+        super().__init__(*args, **kwargs)
+        self.if_fp8_activation = if_fp8_activation
+        
+    def forward(
+        self,
+        inp: torch.Tensor,
+        is_first_microbatch: Optional[bool] = None,
+    ):
+        """Forward function.
+
+        Args:
+            inp (torch.Tensor or ScalingTensor): Input tensor.
+            is_first_microbatch (bool, optional): Whether this is the first microbatch. Coincides with the te.LayerNormMLP input param.
+
+        Returns:
+            torch.Tensor or ScalingTensor: Output tensor.
+        """
+        
+        #! manually disabled
+        # if DEVELOPER_SET_FP8_ACT:
+        #     self.if_fp8_activation = True
+            
+        if self.if_fp8_activation:
+            qtype = Dtypes.dtype_to_qtype[inp.dtype]
+            meta = ScalingMeta(Dtypes.kfloat8_e4m3)
+            inp_casted = TypeCast.cast_to_fp8(inp, meta)
+            if SIMU_FP8_ACT:
+                inp_casted = TypeCast.cast_from_fp8(inp_casted, meta, qtype)
+                return super().forward(inp_casted, is_first_microbatch=is_first_microbatch)
+            else:   # TODO - fix bug
+                out = super().forward(inp_casted, is_first_microbatch=is_first_microbatch)
+                return TypeCast.cast_from_fp8(out, meta, qtype)
+        else:
+            return super().forward(inp, is_first_microbatch=is_first_microbatch)
 
 
 class CtxWrapper:
