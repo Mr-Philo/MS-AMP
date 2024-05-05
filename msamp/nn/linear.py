@@ -63,8 +63,8 @@ class FP8Linear(ScalingModule):
 
     def extra_repr(self):
         """Return the extra representation of this module."""
-        return 'in_features={}, out_features={}, bias={}'.format(
-            self.in_features, self.out_features, self.bias is not None
+        return 'in_features={}, out_features={}, bias={}, enabling_fp8_activation={}'.format(
+            self.in_features, self.out_features, self.bias is not None, self.enabling_fp8_activation
         )
 
 
@@ -162,7 +162,7 @@ class LinearReplacer:
             return fp8_net
         else:
             for child_name, child in list(model.named_children()):
-                setattr(model, child_name, cls._replace(child, weight_qtype))
+                setattr(model, child_name, cls._replace(child, weight_qtype, enabling_fp8_activation))
         return model
 
     @classmethod
