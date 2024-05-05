@@ -43,10 +43,12 @@ class _FP8GemmFunction(torch.autograd.Function):
         model_state.check_metas_in_flat(metas)
         
         if isinstance(input, torch.Tensor):
+            requires_grad = input.requires_grad
             input_meta = metas['input']
             input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta)
             # print(f">>> In _FP8GemmFunction.forward, intime quantization: input: {input_fp8}")    #! temporary
         elif isinstance(input, ScalingTensor):
+            requires_grad = input._requires_grad        # the way of getting 'requires_grad' attribute is different from torch.Tensor
             input_fp8 = input
             # print(f">>> In _FP8GemmFunction.forward, pre quantization: input: {input_fp8}")       #! temporary
         else:
@@ -55,7 +57,7 @@ class _FP8GemmFunction(torch.autograd.Function):
         weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
 
         ctx.input_fp8 = input_fp8
-        ctx.input_fp8.requires_grad = input.requires_grad
+        ctx.input_fp8.requires_grad = requires_grad
         ctx.weight_fp8 = weight_fp8
         ctx.weight = weight
 
@@ -172,7 +174,7 @@ class FunctionalOverider:
                 if not isinstance(input, ScalingTensor):
                     raise TypeError(f'input should be a torch.Tensor. current type: {type(input)}')
                 else:
-                    raise ValueError('enabling_fp8_activation should be True when input is ScalingTensor.')
+                    raise TypeError('enabling_fp8_activation should be True when input is ScalingTensor.')
             if not isinstance(weight, (torch.Tensor, ScalingTensor)):
                 raise TypeError(f'weight should be a torch.Tensor or ScalingTensor. current type: {type(weight)}')
             if bias is not None and not isinstance(bias, torch.Tensor):

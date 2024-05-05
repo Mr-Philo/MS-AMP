@@ -168,17 +168,55 @@ class LinearTestCase(unittest.TestCase):
         linear = torch.nn.Linear(4, 8).cuda()
         
         # for standard comparison
-        model1 = LinearReplacer.replace(linear, Dtypes.kfloat16)
+        model1 = copy.deepcopy(linear)
+        model1 = LinearReplacer.replace(model1, Dtypes.kfloat16)
         output1 = model1(input)
         print(f"fp16 model output: {output1}, with dtype: {output1.dtype}")
         
-        print("------------For fp8 activation model------------")        
-        model2 = LinearReplacer.replace(linear, Dtypes.kfloat16, enabling_fp8_activation=True)
+        print("------------For fp8 activation model------------")
+        model2 = copy.deepcopy(linear)   
+        model2 = LinearReplacer.replace(model2, Dtypes.kfloat16, enabling_fp8_activation=True)
         input = input.cast(Dtypes.kfloat8_e4m3, meta=model2.scaling_metas['input'])
-        input.requires_grad = True
+        # print(hasattr(input, 'requires_grad'))        # True
+        # print(input.requires_grad)                    # False
+        # input.requires_grad = True            #! previously naive debug
         print(f"input: {input}, with dtype: {input.dtype}")
         
         output = model2(input)
         print(f"output: {output}, with dtype: {output.dtype}")
         
+        print(f"difference: {output1 - output.float()}")
+        
         # python -m unittest tests.nn.test_linear.LinearTestCase.test_activation_fp8
+        
+    @decorator.cuda_test
+    def test_activation_fp8_multilayer(self):
+        input = torch.randn((4, 4), device='cuda')
+        model = torch.nn.Sequential(
+            torch.nn.Linear(4, 8).cuda(),
+            torch.nn.Linear(8, 8).cuda(),
+            torch.nn.Linear(8, 4).cuda()
+        )
+        
+        model1 = copy.deepcopy(model)
+        model1 = LinearReplacer.replace(model1, Dtypes.kfloat16)
+        output1 = model1(input)
+        print(f"fp16 model output: {output1}, with dtype: {output1.dtype}")
+        
+        print("------------For fp8 activation model------------")
+        model2 = copy.deepcopy(model)
+        model2 = LinearReplacer.replace(model2, Dtypes.kfloat16, enabling_fp8_activation=True)
+        
+        print(model2)
+        
+        input = input.cast(Dtypes.kfloat8_e4m3, meta=model2[0].scaling_metas['input'])
+        print("check if ScalingTensor has attribute 'requires_grad': {hasattr(input, 'requires_grad')}")
+        print(f"input: {input}, with dtype: {input.dtype}")
+        
+        output = model2(input)
+        print(f"output: {output}, with dtype: {output.dtype}")
+        
+        print(f"difference: {output1 - output.float()}")
+        
+        # python -m unittest tests.nn.test_linear.LinearTestCase.test_activation_fp8_multilayer
+        
