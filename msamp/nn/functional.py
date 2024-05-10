@@ -16,7 +16,7 @@ from msamp.nn.parameter import ScalingParameter
 class _FP8GemmFunction(torch.autograd.Function):
     """A function provides fp8 gemm forward and backward computations."""
     @staticmethod
-    def forward(ctx, input, weight, metas, dtype_holder):
+    def forward(ctx, input, weight, metas, dtype_holder, enabling_fp8_activation=False):
         """Forward function.
 
         Args:
@@ -26,6 +26,7 @@ class _FP8GemmFunction(torch.autograd.Function):
             metas (dict): Scaling meta of input, weight and output.
             dtype_holder (torch.Tensor): A tensor to hold the output dtype. The required_grad of this tensor
                 should be if input.required_grad is False.
+            enabling_fp8_activation (bool): Whether to enable fp8 activation.
         """
         if isinstance(weight, torch.Tensor) and hasattr(weight, '_meta'):
             padded = weight._padded
@@ -66,12 +67,23 @@ class _FP8GemmFunction(torch.autograd.Function):
 
         ctx.output_dtype = output_dtype
         ctx.output_qtype = output_qtype
+        ctx.enabling_fp8_activation = enabling_fp8_activation
 
         out = Gemm.fp8_gemm(weight_fp8, input_fp8, output_qtype, use_split_accumulator=False)
+        ctx.out_shape = out.shape
+        
+        if ctx.enabling_fp8_activation:
+            out = out.cast(Dtypes.kfloat8_e4m3, meta=metas['ograd'])
+            out_meta = out.meta
+            ctx.out_meta = out_meta
+            out = out.value.view(dtype=torch.float16)          # maintain the grad_fn
+            # ctx.mark_non_differentiable(out_meta)
+            return out, out_meta
+        
         return out
 
     @staticmethod
-    def backward(ctx, output_grad):
+    def backward(ctx, output_grad, fake_meta_grad=None):
         """Backward function.
 
         Args:
@@ -84,6 +96,18 @@ class _FP8GemmFunction(torch.autograd.Function):
         """
         # pytorch has a bug that output_grad.strides is 0. Use .contiguous() to fix it.
         output_grad = output_grad.contiguous()
+        
+        
+        #! TODO: when enabling_fp8_activation is True, how to correctly deal with output_grad?
+        if ctx.enabling_fp8_activation:
+            if output_grad.shape != ctx.out_shape:
+                print(f">>> In _FP8GemmFunction.backward, output_grad.shape != ctx.shape, outputgrad: {output_grad}")       #! temporary
+                # 理论上来说，只有在算第一个backward的时候，会按照view到fp16后的形状来赋一个全1的tensor
+                # 如果在确保前面的梯度计算都正确的前提下，针对中间层的某一个FP8GemmFunction输出，其output_grad由于是上一层算回来的
+                # 所以这时形状应该也是能对得上的，因此不需要再做额外的处理
+                output_grad = torch.cat([output_grad, output_grad], dim=-1)
+        else:
+            assert output_grad.shape == ctx.out_shape, f"activation grad shape should be the same as activation shape {ctx.out_shape}, but got {output_grad.shape}"
 
         # We assign gradients to x.grad directly.
         metas = ctx.metas
@@ -124,7 +148,7 @@ class _FP8GemmFunction(torch.autograd.Function):
                 wgrad = wgrad.cast(Dtypes.kfloat8_e4m3, meta=wgrad_meta, sync=True)
                 wgrad = wgrad.value.view(-1).view(dtype=torch.float32)
                 wgrad.meta = wgrad_meta
-                return input_grad, wgrad, None, None
+                return input_grad, wgrad, None, None, None
             elif model_state.use_fp8_ddp:
                 wgrad.meta = wgrad_meta
             else:
@@ -133,7 +157,7 @@ class _FP8GemmFunction(torch.autograd.Function):
 
             ctx.weight.backward_grad_update(wgrad)
 
-        return input_grad, None, None, None
+        return input_grad, None, None, None, None
 
 
 class FunctionalOverider:
@@ -208,15 +232,24 @@ class FunctionalOverider:
                 output_dtype = torch.get_autocast_gpu_dtype() if torch.is_autocast_enabled() else input.dtype
             # print(f">>> In FuctionalOverider._get_wrapper_for_linear, input: {input}")    #! temporary
             
-            out = _FP8GemmFunction.apply(input, weight, weight._scaling_metas, cls.EMPTY_GRAD_TENSOR.type(output_dtype))
+            out = _FP8GemmFunction.apply(
+                input, 
+                weight, 
+                weight._scaling_metas, 
+                cls.EMPTY_GRAD_TENSOR.type(output_dtype), 
+                enabling_fp8_activation
+            )
             if bias is not None:
                 out = out + bias.type(output_dtype).view(1, -1)
 
             if len(shape) != 2:
                 out = out.view(shape[:-1] + (-1, ))
                 
-            if enabling_fp8_activation:
-                out = out.cast(Dtypes.kfloat8_e4m3, meta=weight._scaling_metas['ograd'])
+            # if enabling_fp8_activation:
+            #     out = out.cast(Dtypes.kfloat8_e4m3, meta=weight._scaling_metas['ograd'])        #! 这里直接投射会损失梯度
+            #     assert isinstance(out, ScalingTensor)
+            #     out._requires_grad = input.requires_grad
+            #     # out.grad_fn =         #? 怎么自动构建计算图？
                 
             return out
 

@@ -171,6 +171,11 @@ meta.dtype is {meta_dtype} (meta.qtype is {meta.qtype}).'
         return rtn
 
     @torch.no_grad()
+    def sum(self):
+        '''Get the sum of the tensor.'''
+        return self.float().sum()
+        
+    @torch.no_grad()
     def mul_(self, other):
         """Multiplies self by other value.
 
@@ -362,6 +367,29 @@ meta.dtype is {meta_dtype} (meta.qtype is {meta.qtype}).'
     def grad_fn(self):
         """Decoration function to get grad function, currently only returns None."""
         return None
+
+    # @property
+    # def requires_grad(self):
+    #     """Get requires_grad.
+
+    #     Return:
+    #         bool: whether require gradient.
+    #     """
+    #     return self._requires_grad
+    
+    # @requires_grad.setter
+    # def requires_grad(self, requires_grad):
+    #     """Set requires_grad.
+
+    #     Args:
+    #         requires_grad (bool): whether require gradient.
+    #     """
+    #     self._requires_grad = requires_grad
+        
+    # @requires_grad.deleter
+    # def requires_grad(self):
+    #     """Delete requires_grad."""
+    #     del self._requires_grad
 
     def requires_grad_(self, requires_grad):
         """Set requires_grad.
