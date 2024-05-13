@@ -177,7 +177,7 @@ class LinearTestCase(unittest.TestCase):
         print("------------For fp8 activation model------------")
         model2 = copy.deepcopy(linear)   
         model2 = LinearReplacer.replace(model2, Dtypes.kfloat16, enabling_fp8_activation=True)
-        input = input.cast(Dtypes.kfloat8_e4m3, meta=model2.scaling_metas['input'])
+        # input = input.cast(Dtypes.kfloat8_e4m3, meta=model2.scaling_metas['input'])       # 最新实现中（5.13）禁用了ScalingTensor的输入
         # print(hasattr(input, 'requires_grad'))        # True
         # print(input.requires_grad)                    # False
         # input.requires_grad = True            #! previously naive debug
@@ -225,21 +225,27 @@ class LinearTestCase(unittest.TestCase):
         
         print(model2)
         
-        input = input.cast(Dtypes.kfloat8_e4m3, meta=model2[0].scaling_metas['input'])
-        print(f"check if ScalingTensor has attribute 'requires_grad': {hasattr(input, 'requires_grad')}")
-        print(f"input: {input}, with dtype: {input.dtype}")
+        # input = input.cast(Dtypes.kfloat8_e4m3, meta=model2[0].scaling_metas['input'])
+        # print(f"check if ScalingTensor has attribute 'requires_grad': {hasattr(input, 'requires_grad')}")
+        print(f"input: {input}, with dtype: {input.dtype}")     # 这里input既可以用torch.tensor，也可以用ScalingTensor
         
         output = model2(input)
-        print(f"output: {output}, with dtype: {output.dtype}")
+        if isinstance(output, tuple):
+            output, meta = output
+        print(f"output: {output}, with dtype: {output.dtype}, requires_grad: {output.requires_grad}")
+        assert meta is not None
+        out_int8 = output.view(dtype=torch.uint8)       # fp16先view回int8，确保数值计算是对的
+        output = TypeCast.cast_from_fp8(out_int8, meta, Dtypes.kfloat32)
+        print(f"casted output: {output}")
         
-        print(f"difference: {output1 - output.float()}")
+        print(f"difference: {output1 - output}")
         
         # python -m unittest tests.nn.test_linear.LinearTestCase.test_activation_fp8_multilayer
     
     @decorator.cuda_test
     def test_activation_fp8_backward(self):
         """Test backward of FP8 activation in FP8Linear."""
-        input = torch.randn((4, 4), device='cuda')
+        input = torch.randn((3, 4), device='cuda')
         linear = torch.nn.Linear(4, 8, bias=False).cuda()
         
         # for standard comparison
@@ -258,16 +264,18 @@ class LinearTestCase(unittest.TestCase):
         print("------------For fp8 activation model------------")
         model2 = copy.deepcopy(linear)   
         model2 = LinearReplacer.replace(model2, Dtypes.kfloat16, enabling_fp8_activation=True)
-        input = input.cast(Dtypes.kfloat8_e4m3, meta=model2.scaling_metas['input'])
-        print(f"input: {input}, with dtype: {input.dtype}, with requires_grad: {input._requires_grad}")
+        # input = input.cast(Dtypes.kfloat8_e4m3, meta=model2.scaling_metas['input'])
+        # print(f"input: {input}, with dtype: {input.dtype}, with requires_grad: {input._requires_grad}")
         
         output2 = model2(input)         # previously, type(output2) = ScalingTensor
         if isinstance(output2, tuple):
             output2, meta = output2     # type(output2) = torch.Tensor
-        print(f"FP8 output: {output2}, with dtype: {output2.dtype}, with requires_grad: {output2.requires_grad}, with grad_fn: {output2.grad_fn}")
+        print(f"FP8 model output: {output2}, with dtype: {output2.dtype}, with requires_grad: {output2.requires_grad}, with grad_fn: {output2.grad_fn}")
         
         #! we must make sure that the loss function contains the gradient
-        output2.sum().backward()
+        loss = output2.sum()
+        print(f">>> output2.sum: {loss}, with requires_grad: {loss.requires_grad}, with grad_fn: {loss.grad_fn}")
+        loss.backward()
         
         # class ScalingSum(torch.autograd.Function):
         #     @staticmethod
@@ -284,8 +292,61 @@ class LinearTestCase(unittest.TestCase):
     
         # print(f"weight grad: {model2.weight.grad}, with dtype: {model2.weight.grad.dtype}")
         print(f"weight grad: {model2.weight.grad}")     #! None
-        #! 5.10 此时weight grad shape为4*4, weight shape为4*8，这是因为Gemm func里面还未处理view导致tensor的张量形状变化问题，uint8的张量view成float16的会导致tensor最后一维大小÷2
+        #! 5.10 此时weight grad shape为4*4, weight shape为4*8，这是因为Gemm func里面还未处理view导致tensor的张量形状变化问题，uint8的张量view成float16的会导致tensor最后一维大小÷2 (solved 5.13)
         assert model2.weight.shape == model2.weight.grad.shape, f"Weight grad shape should be the same as model weight shape {model2.weight.shape}, but got {model2.weight.grad.shape}"
         
         # python -m unittest tests.nn.test_linear.LinearTestCase.test_activation_fp8_backward
         
+    @decorator.cuda_test
+    def test_activation_fp8_backward_multilayer(self):
+        """Test backward of FP8 activation in multi-layer FP8Linear."""
+        input = torch.randn((3, 4), device='cuda')
+        model = torch.nn.Sequential(
+            torch.nn.Linear(4, 8, bias=False).cuda(),
+            torch.nn.Linear(8, 8, bias=False).cuda(),
+            torch.nn.Linear(8, 4, bias=False).cuda()
+        )
+        
+        model1 = copy.deepcopy(model)
+        model1 = LinearReplacer.replace(model1, Dtypes.kfloat16)
+        output1 = model1(input)
+        print(f"fp16 model output: {output1}, with dtype: {output1.dtype}, with requires_grad: {output1.requires_grad}, with grad_fn: {output1.grad_fn}")
+        loss = output1.sum()
+        print(f"output1.sum: {loss}, with requires_grad: {loss.requires_grad}, with grad_fn: {loss.grad_fn}")
+        loss.backward()
+        print(f"fp16 model weight grad: {model1[0].weight.grad}, with dtype: {model1[0].weight.grad.dtype}, with requires_grad: {model1[0].weight.grad._requires_grad}")
+        
+        print("------------For fp8 activation model------------")
+        model2 = copy.deepcopy(model)   
+        model2 = LinearReplacer.replace(model2, Dtypes.kfloat16, enabling_fp8_activation=True)
+        output2 = model2(input)
+        # if isinstance(output2, tuple):
+        #     output2, meta = output2     # type(output2) = torch.Tensor
+        print(f"FP8 model output: {output2[0]}, with dtype: {output2[0].dtype}, with requires_grad: {output2[0].requires_grad}, with grad_fn: {output2[0].grad_fn}")
+        
+        class ScalingSum(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, value, meta):
+                ctx.shape = value.shape     # torch.Size([4,2]), 这里是view前FP16 tensor的形状，为的是backward返回到形状不会出错（要和input的value形状保持一致）
+                value = value.view(dtype=torch.uint8)
+                ctx.true_out_shape = value.shape    # torch.Size([4,4]), 这里是view后FP8 tensor的形状
+                value = TypeCast.cast_from_fp8(value, meta, Dtypes.kfloat32)
+                return value.sum()
+            
+            @staticmethod
+            def backward(ctx, grad_output):
+                activation_grad = grad_output * torch.ones(ctx.true_out_shape, dtype=torch.float16).cuda()
+                activation_grad = activation_grad.view(dtype=torch.float32)
+                assert activation_grad.shape == ctx.shape, f"Activation grad shape should be the same as input shape {ctx.shape}, but got {activation_grad.shape}"
+                print(f"ScalingSum return: {activation_grad}")
+                return activation_grad, None
+            
+        loss = ScalingSum.apply(output2[0], output2[1])
+        print(f"loss (ScalingSum): {loss}, with requires_grad: {loss.requires_grad}, with grad_fn: {loss.grad_fn}")
+        # loss = output2.sum()    #! 这里暂时还不能直接sum，因为output2是view后的fp16 tensor，数值是不对的，要自定义一个能正确处理viewed tensor+meta输入的损失函数
+        # print(f"output2.sum: {loss}, with requires_grad: {loss.requires_grad}, with grad_fn: {loss.grad_fn}")
+        
+        loss.backward()
+        print(f"fp8 model weight grad: {model2[0].weight.grad}, with dtype: {model2[0].weight.grad.dtype}, with requires_grad: {model2[0].weight.grad._requires_grad}")
+        
+        # python -m unittest tests.nn.test_linear.LinearTestCase.test_activation_fp8_backward_multilayer

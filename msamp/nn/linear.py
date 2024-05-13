@@ -43,6 +43,7 @@ class FP8Linear(ScalingModule):
 
         self.scaling_metas = dict(
             input=ScalingMeta(Dtypes.kfloat8_e4m3, window_size=FP8Linear.DEFAULT_WINDOW_SIZE),
+            output=ScalingMeta(Dtypes.kfloat8_e4m3, window_size=FP8Linear.DEFAULT_WINDOW_SIZE),
             wgrad=ScalingMeta(Dtypes.kfloat8_e4m3, window_size=FP8Linear.DEFAULT_WGRAD_WINDOW_SIZE),
             ograd=ScalingMeta(Dtypes.kfloat8_e5m2, window_size=FP8Linear.DEFAULT_WINDOW_SIZE)
         )
@@ -59,6 +60,29 @@ class FP8Linear(ScalingModule):
         Returns:
             torch.Tensor (or ScalingTensor if self.enabling_fp8_activation=True): Output tensor.
         """
+        
+        if self.enabling_fp8_activation:
+            '''
+            Ideally input when enabling_fp8_activation should be a tuple of (torch.Tensor, msamp.common.tensor.ScalingMeta)
+            where torch.Tensor is a viewed fp16 tensor containing fp8 activation, and ScalingMeta is corresponding fp8 meta for activation
+            However, for user initial input, it may be only a ScalingTensor or torch.Tensor
+            '''
+            if isinstance(input, tuple):
+                if not isinstance(input[0], torch.Tensor) or not isinstance(input[1], ScalingMeta):
+                    raise TypeError(f"when enabling_fp8_activation is True, input should be a tuple of (torch.Tensor, ScalingMeta), but got ({type(input[0])}, {type(input[1])})")
+            else:
+                if not isinstance(input, (torch.Tensor)):
+                    raise TypeError(f'input should be a torch.Tensor or (torch.Tensor, ScalingMeta). current type: {type(input)}')
+                
+            # we must ensure the input for F.linear() is a torch.Tensor
+            if isinstance(input, tuple):
+                input, input_meta = input       # current input: fp16 tensor viewed from uint8 tensor
+                return F.linear(input, self.weight, bias=self.bias, enabling_fp8_activation=self.enabling_fp8_activation, input_meta=input_meta)
+            # elif isinstance(input, ScalingTensor):        #! currently disable ScalingTensor input
+            #     return F.linear(input.value, self.weight, bias=self.bias, enabling_fp8_activation=self.enabling_fp8_activation, input_meta=input.meta)
+            else:
+                return F.linear(input, self.weight, bias=self.bias, enabling_fp8_activation=self.enabling_fp8_activation)
+            
         return F.linear(input, self.weight, bias=self.bias, enabling_fp8_activation=self.enabling_fp8_activation)
 
     def extra_repr(self):
