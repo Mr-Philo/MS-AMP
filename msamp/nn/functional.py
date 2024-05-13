@@ -157,18 +157,25 @@ class _FP8GemmFunction(torch.autograd.Function):
             weight_fp8_t = ctx.weight_fp8.fp8_transpose()
             input_grad = Gemm.fp8_gemm(weight_fp8_t, ograd_fp8, ctx.output_qtype, use_split_accumulator=True)
             print(f">>> In _FP8GemmFunction.backward, input_grad for return: {input_grad} (before view)")    #! temporary
+            
             # 如果input被view了(uint8->fp16)，那么这里的input_grad也应该是view的
             # 为什么：torch auto grad要求grad的shape和input的shape一致。
             # 例如：input为[3,8]uint8型被view成了[3,4]fp16型，这里计算出来的input_grad是拿view back的[3,8]uint8型计算的
             # 所以算出的input_grad是[3,8]fp16型，这个数值在理论上是正确的，但形式上不符合torch.autograd的要求
             # 所以这里需要把input_gradview到[3,4]fp32型（与view后的input形状保持一致），下次计算的时候再view回[3,8]fp16型
+            
             if ctx.enabling_fp8_activation:
-                if input_grad.dtype == torch.float16:
-                    input_grad = input_grad.view(dtype=torch.float32)
-                elif input_grad.dtype == torch.float32:
-                    input_grad = input_grad.view(dtype=torch.float64)
-                else:
-                    raise NotImplementedError
+                #! add activation grad quantization
+                input_grad = input_grad.cast(Dtypes.kfloat8_e5m2, meta=metas['agrad'])      # backward()函数只能返回torch.tensor或者None。就算返回scaling factor，也只能返回tensor类型的。更别提这儿scaling factor还不知道该怎么back传递到上一层呢
+                
+                
+                # todo: previous logic
+                # if input_grad.dtype == torch.float16:
+                #     input_grad = input_grad.view(dtype=torch.float32)
+                # elif input_grad.dtype == torch.float32:
+                #     input_grad = input_grad.view(dtype=torch.float64)
+                # else:
+                #     raise NotImplementedError
         else:
             input_grad = None
 
