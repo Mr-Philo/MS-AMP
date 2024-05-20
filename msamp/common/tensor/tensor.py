@@ -706,6 +706,18 @@ class TorchOverider:
         torch._amp_foreach_non_finite_check_and_unscale_ = cls._get_wrapper_for_grad_check_and_unscale(
             torch._amp_foreach_non_finite_check_and_unscale_
         )
+        
+        torch.Tensor.scaling_meta = property(cls._get_scaling_meta, cls._set_scaling_meta)
+
+    @staticmethod
+    def _get_scaling_meta(self):
+        if not hasattr(self, '_scaling_meta'):
+            self._scaling_meta = None
+        return self._scaling_meta
+
+    @staticmethod
+    def _set_scaling_meta(self, value):
+        self._scaling_meta = value
 
     @classmethod
     def _override_unary_func(cls):

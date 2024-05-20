@@ -349,3 +349,17 @@ class ScalingTensorTestCase(unittest.TestCase):
         for dtype in dtypes:
             for qtype in qtypes:
                 self._helper_test_grad_check_unscale('cuda', dtype=dtype, qtype=qtype)
+                
+    @decorator.cuda_test
+    def test_tensor_overide_scaling_meta(self):
+        """Test overrided scaling_meta function."""
+        tensor = torch.randn(self.size, device=self.device)
+        meta = ScalingMeta(Dtypes.kfloat8_e5m2)
+        tensor.scaling_meta = meta
+        self.assertTrue(tensor.scaling_meta == meta)
+        scaling_tensor = tensor.cast(Dtypes.kfloat8_e5m2, meta=meta)
+        new_tensor = scaling_tensor.value
+        new_meta = scaling_tensor.meta
+        new_tensor.scaling_meta = new_meta
+        self.assertTrue(isinstance(new_tensor, torch.Tensor))
+        self.assertTrue(new_tensor.scaling_meta == new_meta)

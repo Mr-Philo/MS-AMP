@@ -121,42 +121,34 @@ class _FP8GemmFunction(torch.autograd.Function):
         # pytorch has a bug that output_grad.strides is 0. Use .contiguous() to fix it.
         output_grad = output_grad.contiguous()
         
-        print(f">>> Starting a new backward pass. received output_grad: {output_grad} (before view)")
+        print(f">>> Starting a new backward pass. received output_grad: {output_grad}, with scaling_meta {output_grad.scaling_meta}")
         
-        if output_grad.dtype == torch.float16:
-            output_grad = output_grad.to(torch.float32)     #! TODO: 虽然上一层返回的值是fp32，但这里pytorch会自动把它变回fp16, gpt4说是为了和forward函数的输出保持相同数据格式，真的是醉了。这里手动转回fp32又会导致数值误差，从而view back回fp16的时候数值全是错的。但目前也只能先这么解决这个问题了
         
-        #! TODO: when enabling_fp8_activation is True, how to correctly deal with output_grad?
         if ctx.enabling_fp8_activation:
             assert output_grad.shape[-1]*2 == ctx.true_out_shape[-1]        # view back,见下面分析
-            
-            if output_grad.dtype == torch.float64:
-                output_grad = output_grad.view(dtype=torch.float32)
-            elif output_grad.dtype == torch.float32:
-                output_grad = output_grad.view(dtype=torch.float16)
-            # elif output_grad.dtype == torch.float16:
-            # todo: previous logic (这部分主要是针对SclaingSum损失函数来的，现在考虑再次修改下ScalingSum损失函数) (solved)
-            # if output_grad.shape != ctx.true_out_shape:
-            #     print(f">>> In _FP8GemmFunction.backward, output_grad.shape != ctx.shape, outputgrad: {output_grad}")       #! temporary
-            #     # 理论上来说，只有在算第一个backward的时候，会按照view到fp16后的形状来赋一个全1的tensor
-            #     # 如果在确保前面的梯度计算都正确的前提下，针对中间层的某一个FP8GemmFunction输出，其output_grad由于是上一层算回来的
-            #     # 所以这时形状应该也是能对得上的，因此不需要再做额外的处理
-            #     output_grad = torch.cat([output_grad, output_grad], dim=-1)
         else:
             assert output_grad.shape == ctx.true_out_shape, f"activation grad shape should be the same as activation shape {ctx.true_out_shape}, but got {output_grad.shape}"
             
-        print(f">>>>>> Starting a new backward pass. received output_grad: {output_grad} (after view)")
+        # print(f">>>>>> Starting a new backward pass. received output_grad: {output_grad} (after view)")
 
         # We assign gradients to x.grad directly.
         metas = ctx.metas
         ograd_meta = metas['ograd']
         wgrad_meta = metas['wgrad']
-        ograd_fp8, ograd_fp8_t = output_grad.fused_cast_transpose(Dtypes.kfloat8_e5m2, meta=ograd_meta)
+        
+        #! TODO: when enabling_fp8_activation is True, how to correctly deal with output_grad?
+        if ctx.enabling_fp8_activation:
+            output_grad_meta = output_grad.scaling_meta                         # step1: get meta, see torch.tensor.overrider. # todo: 如果传入的tensor没有置scaling_meta这个属性时，默认是得到None
+            output_grad = output_grad.view(dtype=torch.uint8)                   # step2: fp16 view back to uint8, shape[-1] doubled
+            ograd_fp8 = ScalingTensor(output_grad, meta=output_grad_meta)       # step3: get ScalingTensor
+            ograd_fp8_t = ograd_fp8.fp8_transpose()                             # step4: transpose
+        else:
+            ograd_fp8, ograd_fp8_t = output_grad.fused_cast_transpose(Dtypes.kfloat8_e5m2, meta=ograd_meta)     # fp16 -> fp8 (quantized)
 
         if ctx.input_fp8.requires_grad:
             weight_fp8_t = ctx.weight_fp8.fp8_transpose()
             input_grad = Gemm.fp8_gemm(weight_fp8_t, ograd_fp8, ctx.output_qtype, use_split_accumulator=True)
-            print(f">>> In _FP8GemmFunction.backward, input_grad for return: {input_grad} (before view)")    #! temporary
+            print(f">>> In _FP8GemmFunction.backward, input_grad for return: {input_grad} (before quant)")    #! temporary
             
             # 如果input被view了(uint8->fp16)，那么这里的input_grad也应该是view的
             # 为什么：torch auto grad要求grad的shape和input的shape一致。
@@ -166,20 +158,14 @@ class _FP8GemmFunction(torch.autograd.Function):
             
             if ctx.enabling_fp8_activation:
                 #! add activation grad quantization
-                input_grad = input_grad.cast(Dtypes.kfloat8_e5m2, meta=metas['agrad'])      # backward()函数只能返回torch.tensor或者None。就算返回scaling factor，也只能返回tensor类型的。更别提这儿scaling factor还不知道该怎么back传递到上一层呢
-                
-                
-                # todo: previous logic
-                # if input_grad.dtype == torch.float16:
-                #     input_grad = input_grad.view(dtype=torch.float32)
-                # elif input_grad.dtype == torch.float32:
-                #     input_grad = input_grad.view(dtype=torch.float64)
-                # else:
-                #     raise NotImplementedError
+                input_grad_scaling_tensor = input_grad.cast(Dtypes.kfloat8_e5m2, meta=metas['agrad'])       # step1: quantize
+                input_grad = input_grad_scaling_tensor.value                                 # step2: get torch.tensor (uint8)
+                input_grad = input_grad.view(dtype=torch.float16)                            # step3: uint8 view to fp16, shape[-1] reduced by half
+                input_grad.scaling_meta = input_grad_scaling_tensor.meta                     # step4: set scaling meta, see torch.tensor.overrider
         else:
             input_grad = None
 
-        print(f">>> In _FP8GemmFunction.backward, input_grad for return: {input_grad} (after view)")    #! temporary
+        print(f">>> In _FP8GemmFunction.backward, input_grad for return: {input_grad} (after quant), with scaling_meta {input_grad.scaling_meta if input_grad is not None else None}")    #! temporary
         
         if ctx.weight.requires_grad:
             input_fp8_t = ctx.input_fp8.fp8_transpose()
@@ -217,7 +203,7 @@ class _FP8GemmFunction(torch.autograd.Function):
 
             ctx.weight.backward_grad_update(wgrad)
 
-        print(f">>> In _FP8GemmFunction.backward, input_grad for return: {input_grad} (before return)")    #! temporary
+        # print(f">>> In _FP8GemmFunction.backward, input_grad for return: {input_grad} (before return)")    #! temporary
         return input_grad, None, None, None, None, None
 
 
