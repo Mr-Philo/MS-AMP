@@ -101,6 +101,16 @@ class TransformerEngineWrapper:
         """
         new_args = TransformerEngineWrapper._to_compatible_args(args)
         tex.te_gemm(*new_args)
+        
+    @staticmethod
+    def te_gelu(*args):
+        """GELU operator by calling te_gelu.
+
+        Args:
+            args (Dict): args of the te_gelu operator.
+        """
+        new_args = TransformerEngineWrapper._to_compatible_args(args)
+        return tex.gelu(*new_args)
 
     @staticmethod
     def cast_to_fp8(input, scale, amax, scale_inv, otype):
