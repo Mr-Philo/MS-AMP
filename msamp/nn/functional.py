@@ -16,7 +16,7 @@ from msamp.nn.parameter import ScalingParameter
 class _FP8GemmFunction(torch.autograd.Function):
     """A function provides fp8 gemm forward and backward computations."""
     @staticmethod
-    def forward(ctx, input, weight, metas, dtype_holder, enabling_fp8_activation=False, input_meta=None):
+    def forward(ctx, input, weight, metas, dtype_holder, enabling_fp8_activation=False):
         """Forward function.
 
         Args:
@@ -27,11 +27,7 @@ class _FP8GemmFunction(torch.autograd.Function):
             dtype_holder (torch.Tensor): A tensor to hold the output dtype. The required_grad of this tensor
                 should be if input.required_grad is False.
             enabling_fp8_activation (bool): Whether to enable fp8 activation.
-            input_meta (ScalingMeta): The meta of input tensor. Only set not to None when enabling_fp8_activation is True.
         """
-        if input_meta and (not enabling_fp8_activation):
-            raise ValueError('input_meta should be None when enabling_fp8_activation is False.')
-        
         if isinstance(weight, torch.Tensor) and hasattr(weight, '_meta'):
             padded = weight._padded
             original_shape = weight._original_shape
@@ -52,33 +48,15 @@ class _FP8GemmFunction(torch.autograd.Function):
         if not enabling_fp8_activation:     # normal forward
             input_meta = metas['input']
             input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta)
-            # print(f">>> In _FP8GemmFunction.forward, intime quantization: input: {input_fp8}")    #! temporary
         else:
-            if not input_meta:              # fp8 activation without meta input
+            if not input.is_fp8_form:       # fp16 activation with meta input
                 input_meta = metas['input']
                 input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta)
             else:                           # fp8 activation with meta input. #! we assume that in this time input is a fp16 tensor viewed from a uint8 tensor
+                input_meta = input.scaling_meta
                 input = input.view(dtype=torch.uint8)       # fp16 value -> view to uint8 value
                 input_fp8 = ScalingTensor(input, meta=input_meta)
-                
-            # todo: previous logic
-            # if isinstance(input, tuple):
-            #     input, input_meta = input
-            #     requires_grad = input.requires_grad
-            #     input = input.view(dtype=torch.uint8)       # fp16 value -> view to uint8 value
-            #     input_fp8 = ScalingTensor(input, meta=input_meta)
-            # elif isinstance(input, torch.Tensor):
-            #     requires_grad = input.requires_grad
-            #     input_meta = metas['input']
-            #     input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta)
-            #     # print(f">>> In _FP8GemmFunction.forward, intime quantization: input: {input_fp8}")    #! temporary
-            # elif isinstance(input, ScalingTensor):
-            #     requires_grad = input._requires_grad        # the way of getting 'requires_grad' attribute is different from torch.Tensor
-            #     input_fp8 = input
-            #     # print(f">>> In _FP8GemmFunction.forward, pre quantization: input: {input_fp8}")       #! temporary
-            # else:
-            #     raise ValueError(f'input should be either torch.Tensor or ScalingTensor, but got {type(input)}')
-        
+
         weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
 
         ctx.input_fp8 = input_fp8
@@ -101,13 +79,15 @@ class _FP8GemmFunction(torch.autograd.Function):
             out_meta = out.meta
             ctx.out_meta = out_meta
             out = out.value.view(dtype=torch.float16)          # maintain the grad_fn
+            out.scaling_meta = out_meta
+            out.is_fp8_form = True
             # ctx.mark_non_differentiable(out_meta)
-            return out, out_meta
+            return out
         
         return out
 
     @staticmethod
-    def backward(ctx, output_grad, fake_meta_grad=None):
+    def backward(ctx, output_grad):
         """Backward function.
 
         Args:
@@ -138,6 +118,7 @@ class _FP8GemmFunction(torch.autograd.Function):
         
         #! TODO: when enabling_fp8_activation is True, how to correctly deal with output_grad?
         if ctx.enabling_fp8_activation:
+            assert (output_grad.is_fp8_form and output_grad.scaling_meta is not None), f"output_grad should be a fp8 tensor with scaling_meta, but got outgrad is_fp8_form={output_grad.is_fp8_form} with scaling_meta {output_grad.scaling_meta}"
             output_grad_meta = output_grad.scaling_meta                         # step1: get meta, see torch.tensor.overrider. # todo: 如果传入的tensor没有置scaling_meta这个属性时，默认是得到None
             output_grad = output_grad.view(dtype=torch.uint8)                   # step2: fp16 view back to uint8, shape[-1] doubled
             ograd_fp8 = ScalingTensor(output_grad, meta=output_grad_meta)       # step3: get ScalingTensor
@@ -162,6 +143,7 @@ class _FP8GemmFunction(torch.autograd.Function):
                 input_grad = input_grad_scaling_tensor.value                                 # step2: get torch.tensor (uint8)
                 input_grad = input_grad.view(dtype=torch.float16)                            # step3: uint8 view to fp16, shape[-1] reduced by half
                 input_grad.scaling_meta = input_grad_scaling_tensor.meta                     # step4: set scaling meta, see torch.tensor.overrider
+                input_grad.is_fp8_form = True
         else:
             input_grad = None
 
@@ -194,7 +176,7 @@ class _FP8GemmFunction(torch.autograd.Function):
                 wgrad = wgrad.cast(Dtypes.kfloat8_e4m3, meta=wgrad_meta, sync=True)
                 wgrad = wgrad.value.view(-1).view(dtype=torch.float32)
                 wgrad.meta = wgrad_meta
-                return input_grad, wgrad, None, None, None, None
+                return input_grad, wgrad, None, None, None
             elif model_state.use_fp8_ddp:
                 wgrad.meta = wgrad_meta
             else:
@@ -204,7 +186,7 @@ class _FP8GemmFunction(torch.autograd.Function):
             ctx.weight.backward_grad_update(wgrad)
 
         # print(f">>> In _FP8GemmFunction.backward, input_grad for return: {input_grad} (before return)")    #! temporary
-        return input_grad, None, None, None, None, None
+        return input_grad, None, None, None, None
 
 
 class FunctionalOverider:
@@ -219,8 +201,8 @@ class FunctionalOverider:
     @classmethod
     def _get_wrapper_for_linear(cls, old_fn):
         """Get wrapper for torch.nn.functional.linear (F.linear)."""
-        def new_fn(input, weight, bias=None, enabling_fp8_activation=False, input_meta=None):
-            r"""linear(input, weight, bias=None, enabling_fp8_activation=False, input_meta=None) -> Tensor (or tuple of (Tensor, ScalingMeta)).
+        def new_fn(input, weight, bias=None, enabling_fp8_activation=False):
+            r"""linear(input, weight, bias=None, enabling_fp8_activation=False) -> Tensor.
 
             Applies a linear transformation to the incoming data: :math:`y = xA^T + b`.
 
@@ -255,49 +237,26 @@ class FunctionalOverider:
                 raise ValueError('weight (ScalingTensor) should have _scaling_metas attribute.')
 
             model_state.ready_to_scale_tensor = True
-            shape = input.shape if isinstance(input, (torch.Tensor, ScalingTensor)) else input[0].shape
+            shape = input.shape
 
             if len(shape) != 2:
                 dim = shape[-1]
-                input = input.reshape(-1, dim) if isinstance(input, (torch.Tensor, ScalingTensor))  else (input[0].reshape(-1, dim), input[1])
+                input = input.reshape(-1, dim)
 
-            # todo: output_dtype when enabling_fp8_activation is True
-            if isinstance(input, ScalingTensor):
-                output_dtype = torch.float16        # todo: very temporary solution
-                '''
-                Comments on 2024/04/25: if set output_dtype to ScalingTensor.dtypr(torch.uint8), the following error occurs:
-                File "/data/ruizhe/MS-AMP/msamp/operators/gemm/gemm.py", line 122, in fp8_gemm
-                    tew.te_gemm(
-                File "/data/ruizhe/MS-AMP/msamp/common/utils/transformer_engine_wrapper.py", line 103, in te_gemm
-                    tex.te_gemm(*new_args)
-                RuntimeError: /tmp/pip-install-478citbx/transformer-engine_6eacb10b216149648b925ccd4cfcbcaa/transformer_engine/common/gemm/cublaslt_gemm.cu:267 in function cublas_gemm: Assertion failed: status != CUBLAS_STATUS_NOT_SUPPORTED. Unable to find suitable cuBLAS GEMM algorithm
-                '''
-            elif torch.is_autocast_enabled():
-                output_dtype = torch.get_autocast_gpu_dtype()
-            else:
-                output_dtype = input.dtype if isinstance(input, torch.Tensor) else input[0].dtype
-            # print(f">>> In FuctionalOverider._get_wrapper_for_linear, input: {input}")    #! temporary
-            
+            output_dtype = torch.get_autocast_gpu_dtype() if torch.is_autocast_enabled() else input.dtype    
             out = _FP8GemmFunction.apply(
                 input, 
                 weight, 
                 weight._scaling_metas, 
                 cls.EMPTY_GRAD_TENSOR.type(output_dtype), 
-                enabling_fp8_activation,
-                input_meta
+                enabling_fp8_activation
             )
             if bias is not None:
                 out = out + bias.type(output_dtype).view(1, -1)
 
             if len(shape) != 2:
                 out = out.view(shape[:-1] + (-1, ))
-                
-            # if enabling_fp8_activation:
-            #     out = out.cast(Dtypes.kfloat8_e4m3, meta=weight._scaling_metas['ograd'])        #! 这里直接投射会损失梯度
-            #     assert isinstance(out, ScalingTensor)
-            #     out._requires_grad = input.requires_grad
-            #     # out.grad_fn =         #? 怎么自动构建计算图？
-                
+
             return out
 
         return new_fn

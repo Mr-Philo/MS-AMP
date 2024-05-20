@@ -707,16 +707,33 @@ class TorchOverider:
             torch._amp_foreach_non_finite_check_and_unscale_
         )
         
+        torch.Tensor.is_fp8_form = property(cls._get_is_fp8_form, cls._set_is_fp8_form)
         torch.Tensor.scaling_meta = property(cls._get_scaling_meta, cls._set_scaling_meta)
 
     @staticmethod
+    def _get_is_fp8_form(self):
+        '''Get is_fp8_form property.'''
+        if not hasattr(self, '_is_fp8_form'):
+            self._is_fp8_form = False
+        return self._is_fp8_form
+    
+    @staticmethod
+    def _set_is_fp8_form(self, value):
+        '''Set is_fp8_form property.'''
+        assert isinstance(value, bool), 'attribute is_fp8_form must be a boolean.'
+        self._is_fp8_form = value
+    
+    @staticmethod
     def _get_scaling_meta(self):
+        '''Get scaling_meta property.'''
         if not hasattr(self, '_scaling_meta'):
             self._scaling_meta = None
         return self._scaling_meta
 
     @staticmethod
     def _set_scaling_meta(self, value):
+        '''Set scaling_meta property.'''
+        assert isinstance(value, ScalingMeta), 'scaling_meta must be a ScalingMeta object.'
         self._scaling_meta = value
 
     @classmethod
