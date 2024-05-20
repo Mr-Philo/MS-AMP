@@ -118,13 +118,13 @@ class _FP8GemmFunction(torch.autograd.Function):
             tuple (torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor): The gradients of the arguments
                 in forward function. None if no gradient.
         """
+        print(f">>> Starting a new backward pass. received output_grad: {output_grad} (before view)")
         # pytorch has a bug that output_grad.strides is 0. Use .contiguous() to fix it.
         output_grad = output_grad.contiguous()
         
-        print(f">>> Starting a new backward pass. received output_grad: {output_grad} (before view)")
         
         if output_grad.dtype == torch.float16:
-            output_grad = output_grad.to(torch.float32)     #! TODO: 虽然上一层返回的值是fp32，但这里pytorch会自动把它变回fp16, gpt4说是为了和forward函数的输出保持相同数据格式，真的是醉了。这里手动转回fp32又会导致数值误差，从而view back回fp16的时候数值全是错的。但目前也只能先这么解决这个问题了
+            output_grad = output_grad.to(torch.float32)     #! TODO: 虽然上一层返回的值是fp32，但这里pytorch会自动把它变回fp16, gpt4说是为了和forward函数的输出保持相同数据格式，真的是醉了(5.17验证了此时的output_grad确实是和上面forward输出的out tensor保持一致)。这里手动转回fp32又会导致数值误差，从而view back回fp16的时候数值全是错的。但目前也只能先这么解决这个问题了
         
         #! TODO: when enabling_fp8_activation is True, how to correctly deal with output_grad?
         if ctx.enabling_fp8_activation:
@@ -165,8 +165,10 @@ class _FP8GemmFunction(torch.autograd.Function):
             if ctx.enabling_fp8_activation:
                 if input_grad.dtype == torch.float16:
                     input_grad = input_grad.view(dtype=torch.float32)
+                    input_grad.lock_dtype()
                 elif input_grad.dtype == torch.float32:
                     input_grad = input_grad.view(dtype=torch.float64)
+                    input_grad.lock_dtype()
                 else:
                     raise NotImplementedError
         else:

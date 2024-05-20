@@ -706,6 +706,31 @@ class TorchOverider:
         torch._amp_foreach_non_finite_check_and_unscale_ = cls._get_wrapper_for_grad_check_and_unscale(
             torch._amp_foreach_non_finite_check_and_unscale_
         )
+        
+        torch.Tensor.lock_dtype = cls._lock_dtype
+        torch.Tensor.unlock_dtype = cls._unlock_dtype
+        torch.Tensor._is_dtype_locked = False  # Initial state
+        original_to = torch.Tensor.to
+        
+        def locked_to(self, *args, **kwargs):
+            """Override to function of torch.Tensor."""
+            if self._is_dtype_locked:
+                # Remove dtype from kwargs if present
+                kwargs.pop('dtype', None)
+                # If dtype is in args, filter it out
+                args = tuple(arg for arg in args if not isinstance(arg, torch.dtype))
+                # todo: add UserWarning: dtype is locked
+            return original_to(self, *args, **kwargs)
+        
+        original_type = torch.Tensor.type
+        def locked_type(self, dtype=None, non_blocking=False):
+            if self._is_dtype_locked and dtype is not None and isinstance(dtype, torch.dtype):
+                # todo: add UserWarning: dtype is locked
+                return self
+            return original_type(self, dtype=dtype, non_blocking=non_blocking)
+        
+        torch.Tensor.type = locked_type
+        torch.Tensor.to = locked_to
 
     @classmethod
     def _override_unary_func(cls):
@@ -713,6 +738,17 @@ class TorchOverider:
         for func_name in cls.torch_unary_funcs:
             base, name = cls._get_func_base_and_name(func_name)
             setattr(base, name, cls._get_wrapper_for_torch_unary(getattr(base, name)))
+            
+    @staticmethod
+    def _lock_dtype(tensor):
+        '''Lock the dtype of the tensor.'''
+        tensor._original_dtype = tensor.dtype
+        tensor._is_dtype_locked = True
+
+    @staticmethod
+    def _unlock_dtype(tensor):
+        '''Unlock the dtype of the tensor.'''
+        tensor._is_dtype_locked = False
 
     @staticmethod
     def _cast_to_scalingtensor(self, qtype, meta=None, sync=False):

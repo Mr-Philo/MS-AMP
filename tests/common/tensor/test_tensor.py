@@ -349,3 +349,39 @@ class ScalingTensorTestCase(unittest.TestCase):
         for dtype in dtypes:
             for qtype in qtypes:
                 self._helper_test_grad_check_unscale('cuda', dtype=dtype, qtype=qtype)
+                
+    @decorator.cuda_test
+    def test_lock_dtype(self):
+        """Test lock_dtype function in overrided torch.tensor."""
+        t = torch.randn(self.size, device=self.device)
+        print(t.dtype)  # Output: torch.float32
+
+        # Lock the dtype
+        t.lock_dtype()
+
+        # Attempt to change the dtype
+        t = t.to(torch.float16)  # This will not change the dtype
+        print(t.dtype)  # Output: torch.float32
+        
+        t = t.type(torch.float16)   # This will not change the dtype
+        print(t.dtype)  # Output: torch.float32
+
+        # Change the device
+        t = t.to('cpu')  # This will change the device without changing the dtype
+        print(t.device) # Output: cpu
+
+        # Unlock the dtype
+        t.unlock_dtype()
+
+        # Now changing the dtype is allowed
+        t = t.to(torch.float16)
+        print(t.dtype)  # Output: torch.float16
+        t = t.type(torch.float32)
+        print(t.dtype)  # Output: torch.float32
+        
+        t.lock_dtype()
+        t = t.view(dtype=torch.float16)     # will not affect .view() function
+        print(t.dtype)  # Output: torch.float16
+        print(t.shape)  # Output: torch.Size([4, 8])
+        
+        # python -m unittest tests.common.tensor.test_tensor.ScalingTensorTestCase.test_lock_dtype
