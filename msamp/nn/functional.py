@@ -143,7 +143,7 @@ class _FP8GemmFunction(torch.autograd.Function):
                 input_grad = input_grad_scaling_tensor.value                                 # step2: get torch.tensor (uint8)
                 input_grad = input_grad.view(dtype=torch.float16)                            # step3: uint8 view to fp16, shape[-1] reduced by half
                 input_grad.scaling_meta = input_grad_scaling_tensor.meta                     # step4: set scaling meta, see torch.tensor.overrider
-                input_grad.is_fp8_form = True
+                input_grad.is_fp8_form = True                                                # step5: set flag
         else:
             input_grad = None
 
