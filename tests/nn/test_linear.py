@@ -13,6 +13,7 @@ from msamp.common.tensor import ScalingTensor, ScalingMeta
 from msamp.nn import LinearReplacer
 from tests.helper import decorator
 from msamp.common.tensor import TypeCast
+from msamp.operators.loss_fn import Loss_fn
 
 
 class LinearTestCase(unittest.TestCase):
@@ -253,31 +254,7 @@ class LinearTestCase(unittest.TestCase):
         assert output2.is_fp8_form == True
         print(f"FP8 model output: {output2}, with dtype: {output2.dtype}, with requires_grad: {output2.requires_grad}, with grad_fn: {output2.grad_fn}")
         
-        #! we must make sure that the loss function contains the gradient
-        class ScalingSum(torch.autograd.Function):
-            @staticmethod
-            def forward(ctx, input):
-                meta = input.scaling_meta
-                ctx.shape = input.shape     # torch.Size([3,2]), 这里是view前FP16 tensor的形状，为的是backward返回到形状不会出错（要和input的value形状保持一致）
-                input = input.view(dtype=torch.uint8)
-                ctx.true_out_shape = input.shape    # torch.Size([3,4]), 这里是view后FP8 tensor的形状
-                input = TypeCast.cast_from_fp8(input, meta, Dtypes.kfloat32)
-                return input.sum()
-            
-            @staticmethod
-            def backward(ctx, grad_output):
-                activation_grad = grad_output * torch.ones(ctx.true_out_shape, dtype=torch.float16).cuda()  # torch.Size([3,4])
-                
-                activation_grad_scaling_tensor = activation_grad.cast(Dtypes.kfloat8_e5m2, meta=ScalingMeta(Dtypes.kfloat8_e5m2))    # todo: 在这个SclingSum函数里面，只是为了传回去的activation_grad有scaling_meta这个属性，但是这里这个meta是没有用的，因为毕竟Sum函数的grad_fn是全一。如果之后要实现别的自定义损失函数，这里的meta就有用了，而且可能要考虑forward中的meta值
-                activation_grad = activation_grad_scaling_tensor.value.view(dtype=torch.float16)      # torch.Size([3,4]) to torch.Size([3,2])
-                activation_grad.scaling_meta = activation_grad_scaling_tensor.meta
-                activation_grad.is_fp8_form = True
-                
-                assert activation_grad.shape == ctx.shape, f"Activation grad shape should be the same as input shape {ctx.shape}, but got {activation_grad.shape}"
-                print(f"ScalingSum return: {activation_grad}")
-                return activation_grad
-            
-        loss = ScalingSum.apply(output2)
+        loss = Loss_fn.sum(output2)
         print(f">>> output2.sum: {loss}, with requires_grad: {loss.requires_grad}, with grad_fn: {loss.grad_fn}")
         loss.backward()
         
@@ -313,30 +290,7 @@ class LinearTestCase(unittest.TestCase):
         assert output2.is_fp8_form == True
         print(f"FP8 model output: {output2}, with dtype: {output2.dtype}, with requires_grad: {output2.requires_grad}, with grad_fn: {output2.grad_fn}")
         
-        class ScalingSum(torch.autograd.Function):
-            @staticmethod
-            def forward(ctx, input):
-                meta = input.scaling_meta
-                ctx.shape = input.shape     # torch.Size([3,2]), 这里是view前FP16 tensor的形状，为的是backward返回到形状不会出错（要和input的value形状保持一致）
-                input = input.view(dtype=torch.uint8)
-                ctx.true_out_shape = input.shape    # torch.Size([3,4]), 这里是view后FP8 tensor的形状
-                input = TypeCast.cast_from_fp8(input, meta, Dtypes.kfloat32)
-                return input.sum()
-            
-            @staticmethod
-            def backward(ctx, grad_output):
-                activation_grad = grad_output * torch.ones(ctx.true_out_shape, dtype=torch.float16).cuda()  # torch.Size([3,4])
-                
-                activation_grad_scaling_tensor = activation_grad.cast(Dtypes.kfloat8_e5m2, meta=ScalingMeta(Dtypes.kfloat8_e5m2))    # todo: 在这个SclingSum函数里面，只是为了传回去的activation_grad有scaling_meta这个属性，但是这里这个meta是没有用的，因为毕竟Sum函数的grad_fn是全一。如果之后要实现别的自定义损失函数，这里的meta就有用了，而且可能要考虑forward中的meta值
-                activation_grad = activation_grad_scaling_tensor.value.view(dtype=torch.float16)      # torch.Size([3,4]) to torch.Size([3,2])
-                activation_grad.scaling_meta = activation_grad_scaling_tensor.meta
-                activation_grad.is_fp8_form = True
-                
-                assert activation_grad.shape == ctx.shape, f"Activation grad shape should be the same as input shape {ctx.shape}, but got {activation_grad.shape}"
-                print(f"ScalingSum return: {activation_grad}")
-                return activation_grad
-            
-        loss = ScalingSum.apply(output2)
+        loss = Loss_fn.sum(output2)
         print(f"loss (ScalingSum): {loss}, with requires_grad: {loss.requires_grad}, with grad_fn: {loss.grad_fn}")
         # loss = output2.sum()    #! 这里暂时还不能直接sum，因为output2是view后的fp16 tensor，数值是不对的，要自定义一个能正确处理viewed tensor+meta输入的损失函数
         # print(f"output2.sum: {loss}, with requires_grad: {loss.requires_grad}, with grad_fn: {loss.grad_fn}")
