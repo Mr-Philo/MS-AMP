@@ -199,7 +199,48 @@ class _DropoutFunction(torch.autograd.Function):
   
         return grad_input, None, None
     
+
+class _LogSoftmaxFunction(torch.autograd.Function):  
+    '''LogSoftmax function for FP8 input and output.'''  
+      
+    @staticmethod  
+    def forward(ctx, inp: torch.Tensor, dim: int) -> torch.Tensor:  
+        # TODO: dim is not a must-have parameter
+        assert inp.is_fp8_form, "This _LogSoftmaxFunction should only be called with FP8 input. Please check if the input tensor is in FP8 form."  
+        inp = TypeCast.cast_from_fp8(inp.view(dtype=torch.uint8), inp.scaling_meta, Dtypes.kfloat16)  
+          
+        out = torch.nn.functional.log_softmax(inp, dim=dim)  
+        out_scaling_tensor = out.cast(Dtypes.kfloat8_e4m3, meta=ScalingMeta(Dtypes.kfloat8_e4m3))  
+        out = out_scaling_tensor.value.view(dtype=torch.float16)  
+        out.scaling_meta = out_scaling_tensor.meta  
+        out.is_fp8_form = True  
+  
+        ctx.save_for_backward(out, torch.tensor(dim))  
+        ctx.out_scaling_meta = out_scaling_tensor.meta  
+  
+        return out  
+  
+    @staticmethod  
+    def backward(ctx, grad_output):  
+        assert grad_output.is_fp8_form, "This _LogSoftmaxFunction backward should only be called with FP8 gradient. Please check if the gradient back from next layer is in FP8 form."  
+          
+        grad_output = TypeCast.cast_from_fp8(grad_output.view(dtype=torch.uint8), grad_output.scaling_meta, Dtypes.kfloat16)  
+          
+        out, dim = ctx.saved_tensors  
+        out = TypeCast.cast_from_fp8(out.view(dtype=torch.uint8), ctx.out_scaling_meta, Dtypes.kfloat16)  
+  
+        # Compute gradient input  
+        grad_input = grad_output - torch.exp(out) * grad_output.sum(dim=dim.item(), keepdim=True)  
+          
+        # Convert the gradient input back to FP8  
+        grad_input_scaling_tensor = grad_input.cast(Dtypes.kfloat8_e5m2, meta=ScalingMeta(Dtypes.kfloat8_e5m2))  
+        grad_input = grad_input_scaling_tensor.value.view(dtype=torch.float16)  
+        grad_input.scaling_meta = grad_input_scaling_tensor.meta  
+        grad_input.is_fp8_form = True  
+  
+        return grad_input, None 
     
+        
 class Activation:
     """Activation class to support FP8 precision"""
     _empty_tensor = torch.Tensor()
@@ -227,3 +268,11 @@ class Activation:
             return _DropoutFunction.apply(inp, p, training)
         else:
             return torch.nn.functional.dropout(inp, p, training)
+        
+    @classmethod
+    def log_softmax(cls, inp: torch.Tensor, dim: int)-> torch.Tensor:
+        """LogSoftmax function to support FP8 precision"""
+        if inp.is_fp8_form:
+            return _LogSoftmaxFunction.apply(inp, dim)
+        else:
+            return torch.nn.functional.log_softmax(inp, dim)
