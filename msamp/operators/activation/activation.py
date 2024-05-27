@@ -4,6 +4,7 @@
 """Activation module."""
 
 import torch
+import warnings
 
 from msamp.common.dtype import Dtypes, QType
 from msamp.common.utils import Device
@@ -12,6 +13,42 @@ from msamp.common.tensor import ScalingTensor, ScalingMeta
 from msamp.common.tensor import TypeCast
 
 
+''' # temporarily not use
+class FP8ActivationWrapper(torch.nn.Module):
+    def __init__(self, module):
+        super(FP8ActivationWrapper, self).__init__()
+        self.module = module
+
+    def forward(self, inp_fp8):
+        assert inp_fp8.is_fp8_form, "Input must be in FP8 form when using FP8 activation."
+        if not inp_fp8.scaling_meta:
+            warnings.warn("Input scaling meta is not set. This may cause unexpected behavior. Please check scaling meta is correctly set when using FP8 activation.")
+            inp_fp8.scaling_meta = ScalingMeta(Dtypes.kfloat8_e4m3)
+        inp_fp16 = TypeCast.cast_from_fp8(inp_fp8.view(dtype=torch.uint8), inp_fp8.scaling_meta, Dtypes.kfloat16)
+        out_fp16 = self.module(inp_fp16)
+        out_fp8_scaling_tensor = out_fp16.cast(Dtypes.kfloat8_e4m3, meta=ScalingMeta(Dtypes.kfloat8_e4m3))
+        out_fp8 = out_fp8_scaling_tensor.value.view(dtype=torch.float16)
+        out_fp8.scaling_meta = out_fp8_scaling_tensor.meta
+        out_fp8.is_fp8_form = True
+        return out_fp8
+
+    def backward(self, grad_output):
+        assert grad_output.is_fp8_form, "Grad_output received in backward must be in FP8 form when using FP8 activation."
+        if not grad_output.scaling_meta:
+            warnings.warn("Grad_output scaling meta is not set. This may cause unexpected behavior. Please check scaling meta is correctly set when using FP8 activation.")
+            grad_output.scaling_meta = ScalingMeta(Dtypes.kfloat8_e5m2)
+        grad_output_fp16 = TypeCast.cast_from_fp8(grad_output.view(dtype=torch.uint8), grad_output.scaling_meta, Dtypes.kfloat16)
+        grad_input = self.module.backward(grad_output_fp16)
+        grad_input_fp8_scaling_tensor = grad_input.cast(grad_input, Dtypes.kfloat8_e5m2, ScalingMeta(Dtypes.kfloat8_e5m2))
+        grad_input_fp8 = grad_input_fp8_scaling_tensor.value.view(dtype=torch.float16)
+        grad_input_fp8.scaling_meta = grad_input_fp8_scaling_tensor.meta
+        grad_input_fp8.is_fp8_form = True
+        return grad_input_fp8
+    
+    def __repr__(self):
+        return f"FP8ActivationWrapper({self.module})"
+'''    
+    
 class _GeluFunction(torch.autograd.Function):
     '''Gelu function for FP8 input and output.'''
     @staticmethod
@@ -113,12 +150,54 @@ class _ReluFunction(torch.autograd.Function):
         grad_input = grad_output.clone()
         grad_input[out <= 0] = 0
         
-        grad_input_scaling_tensor = grad_input.cast(Dtypes.kfloat8_e4m3, meta=ScalingMeta(Dtypes.kfloat8_e4m3))
+        grad_input_scaling_tensor = grad_input.cast(Dtypes.kfloat8_e5m2, meta=ScalingMeta(Dtypes.kfloat8_e5m2))
         grad_input = grad_input_scaling_tensor.value.view(dtype=torch.float16)
         grad_input.scaling_meta = grad_input_scaling_tensor.meta
         grad_input.is_fp8_form = True
         
         return grad_input
+    
+    
+class _DropoutFunction(torch.autograd.Function):  
+    '''Dropout function for FP8 input and output.'''  
+      
+    @staticmethod  
+    def forward(ctx, inp: torch.Tensor, p: float, training: bool = True) -> torch.Tensor:  
+        assert inp.is_fp8_form, "This _DropoutFunction should only be called with FP8 input. Please check if the input tensor is in FP8 form."  
+        inp = TypeCast.cast_from_fp8(inp.view(dtype=torch.uint8), inp.scaling_meta, Dtypes.kfloat16)  
+          
+        if training:  
+            mask = (torch.rand_like(inp) > p).float() / (1 - p)  
+            out = inp * mask  
+            ctx.save_for_backward(mask)  
+            ctx.p = p  
+        else:  
+            out = inp  
+          
+        out_scaling_tensor = out.cast(Dtypes.kfloat8_e4m3, meta=ScalingMeta(Dtypes.kfloat8_e4m3))  
+        out = out_scaling_tensor.value.view(dtype=torch.float16)  
+        out.scaling_meta = out_scaling_tensor.meta  
+        out.is_fp8_form = True  
+  
+        return out  
+  
+    @staticmethod  
+    def backward(ctx, grad_output):  
+        assert grad_output.is_fp8_form, "This _DropoutFunction backward should only be called with FP8 gradient. Please check if the gradient back from next layer is in FP8 form."  
+        grad_output = TypeCast.cast_from_fp8(grad_output.view(dtype=torch.uint8), grad_output.scaling_meta, Dtypes.kfloat16)  
+          
+        mask, = ctx.saved_tensors  
+        p = ctx.p  
+  
+        # Compute gradient input  
+        grad_input = grad_output * mask  
+          
+        grad_input_scaling_tensor = grad_input.cast(Dtypes.kfloat8_e5m2, meta=ScalingMeta(Dtypes.kfloat8_e5m2))  
+        grad_input = grad_input_scaling_tensor.value.view(dtype=torch.float16)  
+        grad_input.scaling_meta = grad_input_scaling_tensor.meta  
+        grad_input.is_fp8_form = True  
+  
+        return grad_input, None, None
     
     
 class Activation:
@@ -142,17 +221,9 @@ class Activation:
             return torch.nn.functional.relu(inp)
     
     @classmethod
-    def geglu(inp: ScalingTensor, out: ScalingTensor) -> ScalingTensor:
-        """GeGLU activation function with FP8 output"""
-        return tew.geglu(inp, out)
-    
-    @classmethod
-    def sigmoid(inp: ScalingTensor, out: ScalingTensor) -> ScalingTensor:
-        """Sigmoid activation function with FP8 output"""
-        return tew.sigmoid(inp, out)
-    
-    @classmethod
-    def tanh(inp: ScalingTensor, out: ScalingTensor) -> ScalingTensor:
-        """Tanh activation function with FP8 output"""
-        return tew.tanh(inp, out)
-    
+    def dropout(cls, inp: torch.Tensor, p: float, training: bool = True)-> torch.Tensor:
+        """Dropout function to support FP8 precision"""
+        if inp.is_fp8_form:
+            return _DropoutFunction.apply(inp, p, training)
+        else:
+            return torch.nn.functional.dropout(inp, p, training)

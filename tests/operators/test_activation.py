@@ -7,11 +7,12 @@ import unittest
 import copy
 
 import torch
+import torch.nn.grad
 
 from tests.helper import decorator
 from msamp.common.dtype import Dtypes
 from msamp.nn import LinearReplacer
-from msamp.operators.activation import Activation
+from msamp.operators.activation import Activation, FP8ActivationWrapper
 from msamp.common.tensor import TypeCast, ScalingMeta
 from msamp.operators.loss_fn import Loss_fn
 
@@ -231,4 +232,57 @@ class ActivationTestClass(unittest.TestCase):
         assert model2.linear1.weight.grad.shape == model2.linear1.weight.grad.shape, f"Weight grad shape should be the same as model weight shape {model2.linear1.weight.grad.shape}, but got {model2.linear1.weight.grad.shape}"
         
         # python -m unittest tests.operators.test_activation.ActivationTestClass.test_sequential_relu_and_backward
+        
+    @decorator.cuda_test
+    def test_sequential_dropout_and_backward(self):
+        '''Test the dropout() function (fwd+bwd) in a sequantial module.'''
+        input = torch.randn((3, 4), dtype=torch.float16, device='cuda')
+        
+        class MyModel(torch.nn.Module):
+            def __init__(self):
+                super(MyModel, self).__init__()
+                self.linear1 = torch.nn.Linear(4, 8, bias=False)
+                self.linear2 = torch.nn.Linear(8, 8, bias=False)
+                self.linear3 = torch.nn.Linear(8, 4, bias=False)
+                
+            def forward(self, x):
+                x = self.linear1(x)
+                torch.manual_seed(42)
+                x = Activation.dropout(x, 0.5)
+                x = self.linear2(x)
+                torch.manual_seed(42)
+                x = Activation.dropout(x, 0.5)
+                x = self.linear3(x)
+                return x
+        
+        model = MyModel().cuda()
+        model1 = copy.deepcopy(model)
+        model1 = LinearReplacer.replace(model1, Dtypes.kfloat16)
+        output1 = model1(input)
+        print(f"fp16 model output: {output1}, with dtype: {output1.dtype}")
+        
+        print("------------For fp8 activation model------------")
+        model2 = copy.deepcopy(model)
+        model2 = LinearReplacer.replace(model2, Dtypes.kfloat16, enabling_fp8_activation=True)
+        print(model2)
+        output2 = model2(input)
+        assert output2.is_fp8_form == True
+        print(f"output: {output2}, with dtype: {output2.dtype}, requires_grad: {output2.requires_grad}, scaling_meta: {output2.scaling_meta}")
+        output2_fp = TypeCast.cast_from_fp8(output2.view(dtype=torch.uint8), output2.scaling_meta, Dtypes.kfloat16)
+        print(f"casted output: {output2_fp}")
+        
+        print(f"difference: {output1 - output2_fp}")
+        # 虽然两次dropout前都set了随机种子，但由于底层实现逻辑还是不一样的，所以dropout mask的随机性会导致这里的计算结果并不一样
+        
+        # backward
+        loss1 = Loss_fn.sum(output1)
+        loss1.backward()
+        print(f"fp16 model weight grad: {model1.linear1.weight.grad}, with dtype: {model1.linear1.weight.grad.dtype}, with requires_grad: {model1.linear1.weight.grad._requires_grad}")
+        loss2 = Loss_fn.sum(output2)
+        loss2.backward()
+        print(f"fp8 model weight grad: {model2.linear1.weight.grad}, with dtype: {model2.linear1.weight.grad.dtype}, with requires_grad: {model2.linear1.weight.grad._requires_grad}")
+        
+        assert model2.linear1.weight.grad.shape == model2.linear1.weight.grad.shape, f"Weight grad shape should be the same as model weight shape {model2.linear1.weight.grad.shape}, but got {model2.linear1.weight.grad.shape}"
+        
+        # python -m unittest tests.operators.test_activation.ActivationTestClass.test_sequential_dropout_and_backward
     
