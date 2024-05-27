@@ -65,7 +65,7 @@ class _GeluFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         
-        assert grad_output.is_fp8_form, "This _GeluFunction backward should only be called with FP8 grdient. Please check if the gradient back from next layer  is in FP8 form."
+        assert grad_output.is_fp8_form, "This _GeluFunction backward should only be called with FP8 grdient. Please check if the gradient back from next layer is in FP8 form."
         grad_output = TypeCast.cast_from_fp8(grad_output.view(dtype=torch.uint8), grad_output.scaling_meta, Dtypes.kfloat16)
         print(f">>> grad_output: {grad_output}")      #! temp
         
@@ -83,6 +83,44 @@ class _GeluFunction(torch.autograd.Function):
         return input_grad
 
 
+class _ReluFunction(torch.autograd.Function):
+    '''Relu function for FP8 input and output.'''
+    @staticmethod
+    def forward(ctx, inp: torch.Tensor) -> torch.Tensor:
+        
+        assert inp.is_fp8_form, "This _ReluFunction should only be called with FP8 input. Please check if the input tensor is in FP8 form."
+        inp = TypeCast.cast_from_fp8(inp.view(dtype=torch.uint8), inp.scaling_meta, Dtypes.kfloat16)
+        
+        out = torch.nn.functional.relu(inp)
+        out_scaling_tensor = out.cast(Dtypes.kfloat8_e4m3, meta=ScalingMeta(Dtypes.kfloat8_e4m3))
+        out = out_scaling_tensor.value.view(dtype=torch.float16)
+        out.scaling_meta = out_scaling_tensor.meta
+        out.is_fp8_form = True
+        
+        ctx.save_for_backward(out)
+        ctx.out_scaling_meta = out_scaling_tensor.meta
+        
+        return out
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        assert grad_output.is_fp8_form, "This _ReluFunction backward should only be called with FP8 grdient. Please check if the gradient back from next layer is in FP8 form."
+        grad_output = TypeCast.cast_from_fp8(grad_output.view(dtype=torch.uint8), grad_output.scaling_meta, Dtypes.kfloat16)
+        
+        out, = ctx.saved_tensors
+        out = TypeCast.cast_from_fp8(out.view(dtype=torch.uint8), ctx.out_scaling_meta, Dtypes.kfloat16)
+        
+        grad_input = grad_output.clone()
+        grad_input[out <= 0] = 0
+        
+        grad_input_scaling_tensor = grad_input.cast(Dtypes.kfloat8_e4m3, meta=ScalingMeta(Dtypes.kfloat8_e4m3))
+        grad_input = grad_input_scaling_tensor.value.view(dtype=torch.float16)
+        grad_input.scaling_meta = grad_input_scaling_tensor.meta
+        grad_input.is_fp8_form = True
+        
+        return grad_input
+    
+    
 class Activation:
     """Activation class to support FP8 precision"""
     _empty_tensor = torch.Tensor()
@@ -96,9 +134,12 @@ class Activation:
             return torch.nn.functional.gelu(inp)
     
     @classmethod
-    def relu(inp: ScalingTensor, out: ScalingTensor) -> ScalingTensor:
-        """ReLU activation function with FP8 output"""
-        return tew.relu(inp, out)
+    def relu(cls, inp: torch.Tensor)-> torch.Tensor:
+        """ReLU activation function to support FP8 precision"""
+        if inp.is_fp8_form:
+            return _ReluFunction.apply(inp) 
+        else:
+            return torch.nn.functional.relu(inp)
     
     @classmethod
     def geglu(inp: ScalingTensor, out: ScalingTensor) -> ScalingTensor:
