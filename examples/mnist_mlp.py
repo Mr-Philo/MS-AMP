@@ -5,6 +5,10 @@
 
 from __future__ import print_function
 import argparse
+import time
+import matplotlib.pyplot as plt
+import json
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -43,8 +47,7 @@ class Net(nn.Module):
         output = Activation.log_softmax(x, dim=1)
         return output
 
-
-def train(args, model, device, train_loader, optimizer, epoch):
+def train(args, model, device, train_loader, optimizer, epoch, loss_list):
     """Train the model with given data loader and optimizer.
 
     Args:
@@ -54,6 +57,7 @@ def train(args, model, device, train_loader, optimizer, epoch):
         train_loader (torch.utils.data.DataLoader): the data loader for training.
         optimizer (torch.optim.Optimizer): the optimizer to use.
         epoch (int): the number of epoch to run on data loader.
+        loss_list (list): list to store loss values.
     """
     scaler = torch.cuda.amp.GradScaler()
     model.train()
@@ -66,6 +70,7 @@ def train(args, model, device, train_loader, optimizer, epoch):
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
+        loss_list.append(loss.item())
         if batch_idx % args.log_interval == 0:
             print(
                 'Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
@@ -114,7 +119,7 @@ def main():
     # Training settings
     parser = argparse.ArgumentParser(description='PyTorch MNIST Example')
     parser.add_argument(
-        '--batch-size', type=int, default=64, metavar='N', help='input batch size for training (default: 64)'
+        '--batch-size', type=int, default=256, metavar='N', help='input batch size for training (default: 64)'
     )
     parser.add_argument(
         '--test-batch-size', type=int, default=1000, metavar='N', help='input batch size for testing (default: 1000)'
@@ -167,13 +172,35 @@ def main():
         model, optimizer = msamp.initialize(model, optimizer, opt_level=args.opt_level, enabling_fp8_activation=args.enabling_fp8_activation)
 
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
+
+    loss_list = []
+    epoch_times = []
+
     for epoch in range(1, args.epochs + 1):
-        train(args, model, device, train_loader, optimizer, epoch)
+        start_time = time.time()
+        train(args, model, device, train_loader, optimizer, epoch, loss_list)
         test(model, device, test_loader)
+        epoch_time = time.time() - start_time
+        epoch_times.append(epoch_time)
         scheduler.step()
+
+    avg_epoch_time = sum(epoch_times) / len(epoch_times)
+    print(f"\nTraining finished, average epoch time: {avg_epoch_time:.2f} seconds")
+    print(f"Max CUDA memory allocated: {torch.cuda.max_memory_allocated() / 1024 / 1024:.2f} MB")
 
     if args.save_model:
         torch.save(model.state_dict(), 'mnist_cnn.pt')
+
+    # 绘制损失曲线图
+    plt.figure()
+    plt.plot(loss_list)
+    plt.xlabel('Iteration')
+    plt.ylabel
+    plt.savefig('./loss.png')
+    
+    # 保存loss_list为json格式
+    with open('./O2_FP8act_loss_bs256.json', 'w') as f:
+        json.dump(loss_list, f)
 
 
 if __name__ == '__main__':
