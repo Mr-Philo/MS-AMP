@@ -16,7 +16,7 @@ from msamp.nn.parameter import ScalingParameter
 class _FP8GemmFunction(torch.autograd.Function):
     """A function provides fp8 gemm forward and backward computations."""
     @staticmethod
-    def forward(ctx, input, weight, metas, dtype_holder, enabling_fp8_activation=False):
+    def forward(ctx, input, weight, metas, dtype_holder, bias=None, enabling_fp8_activation=False):
         """Forward function.
 
         Args:
@@ -76,6 +76,8 @@ class _FP8GemmFunction(torch.autograd.Function):
         ctx.enabling_fp8_activation = enabling_fp8_activation
 
         out = Gemm.fp8_gemm(weight_fp8, input_fp8, output_qtype, use_split_accumulator=False)
+        if bias is not None:
+            out = out + bias.type(output_dtype).view(1, -1)
         ctx.gemm_out_shape = out.shape
         
         if len(ctx.inp_shape) != 2:
@@ -198,7 +200,7 @@ class _FP8GemmFunction(torch.autograd.Function):
                 wgrad = wgrad.cast(Dtypes.kfloat8_e4m3, meta=wgrad_meta, sync=True)
                 wgrad = wgrad.value.view(-1).view(dtype=torch.float32)
                 wgrad.meta = wgrad_meta
-                return input_grad, wgrad, None, None, None
+                return input_grad, wgrad, None, None, None, None
             elif model_state.use_fp8_ddp:
                 wgrad.meta = wgrad_meta
             else:
@@ -208,7 +210,7 @@ class _FP8GemmFunction(torch.autograd.Function):
             ctx.weight.backward_grad_update(wgrad)
 
         # print(f">>> In _FP8GemmFunction.backward, input_grad for return: {input_grad} (before return)")    #! temporary
-        return input_grad, None, None, None, None
+        return input_grad, None, None, None, None, None
 
 
 class FunctionalOverider:
@@ -266,10 +268,9 @@ class FunctionalOverider:
                 weight, 
                 weight._scaling_metas, 
                 cls.EMPTY_GRAD_TENSOR.type(output_dtype), 
+                bias,
                 enabling_fp8_activation
             )
-            if bias is not None:
-                out = out + bias.type(output_dtype).view(1, -1)
 
             return out
 
