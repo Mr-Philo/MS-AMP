@@ -334,3 +334,50 @@ class ActivationTestClass(unittest.TestCase):
         assert model2.linear1.weight.grad.shape == model2.linear1.weight.grad.shape, f"Weight grad shape should be the same as model weight shape {model2.linear1.weight.grad.shape}, but got {model2.linear1.weight.grad.shape}"
         
         # python -m unittest tests.operators.test_activation.ActivationTestClass.test_sequential_logsoftmax_and_backward
+        
+    @decorator.cuda_test
+    def test_sequential_flatten_and_backward(self):
+        '''Test the flatten() function (fwd+bwd) in a sequantial module.'''
+        input = torch.randn((3, 4, 4), dtype=torch.float16, device='cuda')
+        
+        class MyModel(torch.nn.Module):
+            def __init__(self):
+                super(MyModel, self).__init__()
+                self.linear1 = torch.nn.Linear(4, 8, bias=False)
+                self.linear2 = torch.nn.Linear(32, 4, bias=False)
+                
+            def forward(self, x):
+                x = self.linear1(x)
+                x = Activation.flatten(x, 1)
+                x = self.linear2(x)
+                return x
+        
+        model = MyModel().cuda()
+        model1 = copy.deepcopy(model)
+        model1 = LinearReplacer.replace(model1, Dtypes.kfloat16)
+        output1 = model1(input)
+        print(f"fp16 model output: {output1}, with dtype: {output1.dtype}")
+        
+        print("------------For fp8 activation model------------")
+        model2 = copy.deepcopy(model)
+        model2 = LinearReplacer.replace(model2, Dtypes.kfloat16, enabling_fp8_activation=True)
+        print(model2)
+        output2 = model2(input)
+        assert output2.is_fp8_form == True
+        print(f"output: {output2}, with dtype: {output2.dtype}, requires_grad: {output2.requires_grad}, scaling_meta: {output2.scaling_meta}")
+        output2_fp = TypeCast.cast_from_fp8(output2.view(dtype=torch.uint8), output2.scaling_meta, Dtypes.kfloat16)
+        print(f"casted output: {output2_fp}")
+        
+        print(f"difference: {output1 - output2_fp}")
+        
+        # backward
+        loss1 = Loss_fn.sum(output1)
+        loss1.backward()
+        print(f"fp16 model weight grad: {model1.linear1.weight.grad}, with dtype: {model1.linear1.weight.grad.dtype}, with requires_grad: {model1.linear1.weight.grad._requires_grad}")
+        loss2 = Loss_fn.sum(output2)
+        loss2.backward()
+        print(f"fp8 model weight grad: {model2.linear1.weight.grad}, with dtype: {model2.linear1.weight.grad.dtype}, with requires_grad: {model2.linear1.weight.grad._requires_grad}")
+        
+        assert model2.linear1.weight.grad.shape == model2.linear1.weight.grad.shape, f"Weight grad shape should be the same as model weight shape {model2.linear1.weight.grad.shape}, but got {model2.linear1.weight.grad.shape}"
+        
+        # python -m unittest tests.operators.test_activation.ActivationTestClass.test_sequential_flatten_and_backward
