@@ -281,6 +281,49 @@ class _FlattenFunction(torch.autograd.Function):
   
         return grad_input, None, None  
     
+
+class _MaxPool2DFunction(torch.autograd.Function):  
+    '''MaxPool2D function for FP8 input and output.'''  
+      
+    @staticmethod  
+    def forward(ctx, inp: torch.Tensor, kernel_size, stride=None, padding=0, dilation=1, ceil_mode=False) -> torch.Tensor:  
+        assert inp.is_fp8_form, "This _MaxPool2DFunction should only be called with FP8 input. Please check if the input tensor is in FP8 form."  
+        inp = TypeCast.cast_from_fp8(inp.view(dtype=torch.uint8), inp.scaling_meta, Dtypes.kfloat16)  
+          
+        # Perform max pooling  
+        out, indices = torch.nn.functional.max_pool2d(inp, kernel_size, stride, padding, dilation, ceil_mode, return_indices=True)  
+          
+        out_scaling_tensor = out.cast(Dtypes.kfloat8_e4m3, meta=ScalingMeta(Dtypes.kfloat8_e4m3))  
+        out = out_scaling_tensor.value.view(dtype=torch.float16)  
+        out.scaling_meta = out_scaling_tensor.meta  
+        out.is_fp8_form = True  
+          
+        ctx.save_for_backward(inp, indices)  
+        ctx.kernel_size = kernel_size  
+        ctx.stride = stride  
+        ctx.padding = padding  
+        ctx.dilation = dilation  
+        ctx.ceil_mode = ceil_mode  
+          
+        return out  
+      
+    @staticmethod  
+    def backward(ctx, grad_output):  
+        assert grad_output.is_fp8_form, "This _MaxPool2DFunction backward should only be called with FP8 gradient. Please check if the gradient back from next layer is in FP8 form."  
+        grad_output = TypeCast.cast_from_fp8(grad_output.view(dtype=torch.uint8), grad_output.scaling_meta, Dtypes.kfloat16)  
+          
+        inp, indices = ctx.saved_tensors  
+          
+        # Compute gradient of input  
+        grad_input = torch.nn.functional.max_unpool2d(grad_output, indices, ctx.kernel_size, ctx.stride, ctx.padding, inp.size())
+          
+        grad_input_scaling_tensor = grad_input.cast(Dtypes.kfloat8_e5m2, meta=ScalingMeta(Dtypes.kfloat8_e5m2))  
+        grad_input = grad_input_scaling_tensor.value.view(dtype=torch.float16)  
+        grad_input.scaling_meta = grad_input_scaling_tensor.meta
+        grad_input.is_fp8_form = True  
+          
+        return grad_input, None, None, None, None, None 
+    
         
 class Activation:
     """Activation class to support FP8 precision"""
@@ -325,3 +368,11 @@ class Activation:
             return _FlattenFunction.apply(inp, start_dim, end_dim)  
         else:  
             return torch.flatten(inp, start_dim, end_dim)  
+        
+    @classmethod
+    def max_pool2d(cls, inp: torch.Tensor, kernel_size, stride=None, padding=0, dilation=1, ceil_mode=False)-> torch.Tensor:  
+        """MaxPool2D function to support FP8 precision"""  
+        if inp.is_fp8_form:  
+            return _MaxPool2DFunction.apply(inp, kernel_size, stride, padding, dilation, ceil_mode)  
+        else:  
+            return torch.nn.functional.max_pool2d(inp, kernel_size, stride, padding, dilation, ceil_mode)

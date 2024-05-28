@@ -381,3 +381,48 @@ class ActivationTestClass(unittest.TestCase):
         assert model2.linear1.weight.grad.shape == model2.linear1.weight.grad.shape, f"Weight grad shape should be the same as model weight shape {model2.linear1.weight.grad.shape}, but got {model2.linear1.weight.grad.shape}"
         
         # python -m unittest tests.operators.test_activation.ActivationTestClass.test_sequential_flatten_and_backward
+        
+    @decorator.cuda_test  
+    def test_sequential_max_pool2d_and_backward(self):  
+        '''Test the max_pool2d() function (fwd+bwd) in a sequential module.'''  
+        input = torch.randn((1, 3, 8, 4), dtype=torch.float16, device='cuda')  
+        class MyModel(torch.nn.Module):
+            def __init__(self):
+                super(MyModel, self).__init__()
+                self.linear = torch.nn.Linear(4, 8, bias=False)
+                
+            def forward(self, x):
+                x = self.linear(x)
+                x = Activation.max_pool2d(x, 2, 2)
+                return x
+        
+        model = MyModel().cuda() 
+        model1 = copy.deepcopy(model)  
+        model1 = LinearReplacer.replace(model1, Dtypes.kfloat16)
+        output1 = model1(input)
+        print(f"fp16 model output: {output1}, with dtype: {output1.dtype}")  
+          
+        print("------------For fp8 activation model------------")  
+        model2 = copy.deepcopy(model)  
+        model2 = LinearReplacer.replace(model2, Dtypes.kfloat16, enabling_fp8_activation=True)  
+        print(model2)  
+        output2 = model2(input)  
+        assert output2.is_fp8_form == True  
+        print(f"output: {output2}, with dtype: {output2.dtype}, requires_grad: {output2.requires_grad}, scaling_meta: {output2.scaling_meta}")  
+        output2_fp = TypeCast.cast_from_fp8(output2.view(dtype=torch.uint8), output2.scaling_meta, Dtypes.kfloat16)  
+        print(f"casted output: {output2_fp}")  
+          
+        print(f"difference: {output1 - output2_fp}")  
+          
+        # backward  
+        loss1 = Loss_fn.sum(output1)  
+        loss1.backward()  
+        print(f"fp16 model weight grad: {model1.linear.weight.grad}, with dtype: {model1.linear.weight.grad.dtype}, with requires_grad: {model1.linear.weight.grad._requires_grad}")  
+          
+        loss2 = Loss_fn.sum(output2)  
+        loss2.backward()  
+        print(f"fp8 model weight grad: {model2.linear.weight.grad}, with dtype: {model2.linear.weight.grad.dtype}, with requires_grad: {model2.linear.weight.grad._requires_grad}")  
+          
+        assert model2.linear.weight.grad.shape == model1.linear.weight.grad.shape, f"Weight grad shape should be the same as model weight shape {model2.linear.weight.grad.shape}, but got {model1.linear.weight.grad.shape}"
+        
+        # python -m unittest tests.operators.test_activation.ActivationTestClass.test_sequential_max_pool2d_and_backward
