@@ -14,6 +14,8 @@ from torch.optim.lr_scheduler import StepLR
 import msamp
 from msamp.operators.activation import Activation
 from msamp.operators.loss_fn import Loss_fn
+from msamp.common.tensor import TypeCast
+from msamp.common.dtype import Dtypes
 
 
 class Net(nn.Module):
@@ -93,6 +95,8 @@ def test(model, device, test_loader):
                 output = model(data)
             # test_loss += F.nll_loss(output, target, reduction='sum').item()    # sum up batch loss
             test_loss += Loss_fn.nll_loss(output, target).item()    # sum up batch loss     # todo optional parameter: reduction='mean'
+            if output.is_fp8_form:
+                output = TypeCast.cast_from_fp8(output.view(dtype=torch.uint8), output.scaling_meta, Dtypes.kfloat16)  
             pred = output.argmax(dim=1, keepdim=True)    # get the index of the max log-probability
             correct += pred.eq(target.view_as(pred)).sum().item()
 
