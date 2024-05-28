@@ -28,6 +28,10 @@ class _FP8GemmFunction(torch.autograd.Function):
                 should be if input.required_grad is False.
             enabling_fp8_activation (bool): Whether to enable fp8 activation.
         """
+        ctx.inp_shape = input.shape
+        if len(ctx.inp_shape) != 2:     # deal with input shape other than [batch, feature]
+            input = input.reshape(-1, ctx.inp_shape[-1])    # to 2D
+                
         if isinstance(weight, torch.Tensor) and hasattr(weight, '_meta'):
             padded = weight._padded
             original_shape = weight._original_shape
@@ -72,6 +76,10 @@ class _FP8GemmFunction(torch.autograd.Function):
         ctx.enabling_fp8_activation = enabling_fp8_activation
 
         out = Gemm.fp8_gemm(weight_fp8, input_fp8, output_qtype, use_split_accumulator=False)
+        ctx.gemm_out_shape = out.shape
+        
+        if len(ctx.inp_shape) != 2:
+            out = out.view(ctx.inp_shape[:-1] + (-1, ))      # to original n-D
         ctx.true_out_shape = out.shape
         
         if ctx.enabling_fp8_activation:
@@ -101,13 +109,25 @@ class _FP8GemmFunction(torch.autograd.Function):
         # pytorch has a bug that output_grad.strides is 0. Use .contiguous() to fix it.
         output_grad = output_grad.contiguous()
         
-        print(f">>> Starting a new backward pass. received output_grad: {output_grad}, with scaling_meta {output_grad.scaling_meta}")
+        # print(f">>> Starting a new backward pass. received output_grad: {output_grad}, with scaling_meta {output_grad.scaling_meta}")
         
-        
+        # some pre-assertion-checks
         if ctx.enabling_fp8_activation:
+            assert (output_grad.is_fp8_form and output_grad.scaling_meta is not None), f"output_grad should be a fp8 tensor with scaling_meta, but got outgrad is_fp8_form={output_grad.is_fp8_form} with scaling_meta {output_grad.scaling_meta}"
             assert output_grad.shape[-1]*2 == ctx.true_out_shape[-1]        # view back,见下面分析
+            assert output_grad.shape == ctx.true_out_shape[:-1] + (int(ctx.true_out_shape[-1]/2), ), f"activation grad shape should be the same as activation shape {ctx.true_out_shape} (under FP8 activation, the last dimension halfed to {ctx.true_out_shape[:-1] + (ctx.true_out_shape[-1]/2, )}, but got {output_grad.shape}"
         else:
-            assert output_grad.shape == ctx.true_out_shape, f"activation grad shape should be the same as activation shape {ctx.true_out_shape}, but got {output_grad.shape}"
+            assert output_grad.shape == ctx.true_out_shape, f"activation grad shape should be the same as activation shape {ctx.true_out_shape} , but got {output_grad.shape}"
+            
+        # deal with input shape other than [batch, feature]. Note this assertion: len(ctx.out_shape) == len(ctx.inp_shape)
+        output_grad_meta = output_grad.scaling_meta     # step1: get meta, see torch.tensor.overrider. avoid the view() operation to destroy the scaling_meta
+        if len(ctx.true_out_shape) != 2:
+            if ctx.enabling_fp8_activation:
+                output_grad = output_grad.view(-1, int(ctx.true_out_shape[-1]/2))    # to 2D
+                assert output_grad.shape == ctx.gemm_out_shape[:-1] + (int(ctx.gemm_out_shape[-1]/2), ), f"activation grad shape for gemm computing should be the same as gemm_activation shape {ctx.gemm_out_shape} (under FP8 activation, the last dimension halfed to {ctx.gemm_out_shape[:-1] + (ctx.gemm_out_shape[-1]/2, )}, but got {output_grad.shape}"
+            else:
+                output_grad = output_grad.view(-1, ctx.true_out_shape[-1])       # to 2D
+                assert output_grad.shape == ctx.gemm_out_shape, f"activation grad shape for gemm computing should be the same as gemm_activation shape {ctx.gemm_out_shape}, but got {output_grad.shape}"
             
         # print(f">>>>>> Starting a new backward pass. received output_grad: {output_grad} (after view)")
 
@@ -118,9 +138,7 @@ class _FP8GemmFunction(torch.autograd.Function):
         
         #! TODO: when enabling_fp8_activation is True, how to correctly deal with output_grad?
         if ctx.enabling_fp8_activation:
-            assert (output_grad.is_fp8_form and output_grad.scaling_meta is not None), f"output_grad should be a fp8 tensor with scaling_meta, but got outgrad is_fp8_form={output_grad.is_fp8_form} with scaling_meta {output_grad.scaling_meta}"
-            output_grad_meta = output_grad.scaling_meta                         # step1: get meta, see torch.tensor.overrider. # todo: 如果传入的tensor没有置scaling_meta这个属性时，默认是得到None
-            output_grad = output_grad.view(dtype=torch.uint8)                   # step2: fp16 view back to uint8, shape[-1] doubled
+            output_grad = output_grad.view(dtype=torch.uint8)                   # step2: fp16 view back to uint8: #! shape[-1] doubled
             ograd_fp8 = ScalingTensor(output_grad, meta=output_grad_meta)       # step3: get ScalingTensor
             ograd_fp8_t = ograd_fp8.fp8_transpose()                             # step4: transpose
         else:
@@ -129,7 +147,7 @@ class _FP8GemmFunction(torch.autograd.Function):
         if ctx.input_fp8.requires_grad:
             weight_fp8_t = ctx.weight_fp8.fp8_transpose()
             input_grad = Gemm.fp8_gemm(weight_fp8_t, ograd_fp8, ctx.output_qtype, use_split_accumulator=True)
-            print(f">>> In _FP8GemmFunction.backward, input_grad for return: {input_grad} (before quant)")    #! temporary
+            # print(f">>> In _FP8GemmFunction.backward, input_grad for return: {input_grad} (before quant)")    #! temporary
             
             # 如果input被view了(uint8->fp16)，那么这里的input_grad也应该是view的
             # 为什么：torch auto grad要求grad的shape和input的shape一致。
@@ -137,17 +155,21 @@ class _FP8GemmFunction(torch.autograd.Function):
             # 所以算出的input_grad是[3,8]fp16型，这个数值在理论上是正确的，但形式上不符合torch.autograd的要求
             # 所以这里需要把input_gradview到[3,4]fp32型（与view后的input形状保持一致），下次计算的时候再view回[3,8]fp16型
             
+            # deal with input shape other than [batch, feature]
+            if len(ctx.true_out_shape) != 2:
+                input_grad = input_grad.view(ctx.true_out_shape[:-1] + (-1, ))       # to original n-D
+            
             if ctx.enabling_fp8_activation:
                 #! add activation grad quantization
                 input_grad_scaling_tensor = input_grad.cast(Dtypes.kfloat8_e5m2, meta=metas['agrad'])       # step1: quantize
                 input_grad = input_grad_scaling_tensor.value                                 # step2: get torch.tensor (uint8)
-                input_grad = input_grad.view(dtype=torch.float16)                            # step3: uint8 view to fp16, shape[-1] reduced by half
+                input_grad = input_grad.view(dtype=torch.float16)                            # step3: uint8 view to fp16: #!shape[-1] reduced by half
                 input_grad.scaling_meta = input_grad_scaling_tensor.meta                     # step4: set scaling meta, see torch.tensor.overrider
                 input_grad.is_fp8_form = True                                                # step5: set flag
         else:
             input_grad = None
 
-        print(f">>> In _FP8GemmFunction.backward, input_grad for return: {input_grad} (after quant), with scaling_meta {input_grad.scaling_meta if input_grad is not None else None}")    #! temporary
+        # print(f">>> In _FP8GemmFunction.backward, input_grad for return: {input_grad} (after quant), with scaling_meta {input_grad.scaling_meta if input_grad is not None else None}")    #! temporary
         
         if ctx.weight.requires_grad:
             input_fp8_t = ctx.input_fp8.fp8_transpose()
@@ -237,11 +259,6 @@ class FunctionalOverider:
                 raise ValueError('weight (ScalingTensor) should have _scaling_metas attribute.')
 
             model_state.ready_to_scale_tensor = True
-            shape = input.shape
-
-            if len(shape) != 2:
-                dim = shape[-1]
-                input = input.reshape(-1, dim)
 
             output_dtype = torch.get_autocast_gpu_dtype() if torch.is_autocast_enabled() else input.dtype    
             out = _FP8GemmFunction.apply(
@@ -253,9 +270,6 @@ class FunctionalOverider:
             )
             if bias is not None:
                 out = out + bias.type(output_dtype).view(1, -1)
-
-            if len(shape) != 2:
-                out = out.view(shape[:-1] + (-1, ))
 
             return out
 
