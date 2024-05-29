@@ -9,6 +9,7 @@ import torch.distributed as dist
 from msamp.common.dtype import Dtypes
 from msamp.common.utils import DistUtil
 from msamp.common.utils import TransformerEngineWrapper
+import warnings
 
 
 class TypeCast:
@@ -134,3 +135,50 @@ class TypeCast:
         return (input * meta.scale_inv.view((1, ))).to(dtype)
 
     cast_from_fp32 = cast_from_fp16
+    
+    @staticmethod
+    def cast_to_fp8_activation(input: torch.Tensor, otype: Dtypes, meta= None, sync=False) -> torch.Tensor:
+        """Cast activation tensor to fp8.
+
+        Args:
+            input (torch.Tensor): Input tensor to cast.
+            otype (Dtypes): The output type: Dtypes.kfloat8_e5m2 or Dtypes.kfloat8_e4m3.
+            meta (ScalingMeta): Scaling meta data used for cast.
+            sync (bool, optional): Sync or not. Defaults to False.
+
+        Return:
+            torch.Tensor: tensor whose dtype is torch.float16 but with fp8 format.
+        """
+        # assert input.dtype == torch.float16, f"Currently only support activation cast from torch.float16, but got {input.dtype}."
+        if meta is None:
+            from msamp.common.tensor import ScalingMeta
+            meta = ScalingMeta(otype)
+        output = TypeCast.cast_to_fp8(input, meta, sync, fuse_transpose=False)
+        output = output.view(dtype=torch.float16)
+        output.scaling_meta = meta
+        output.is_fp8_form = True
+        return output
+    
+    @staticmethod
+    def cast_from_fp8_activation(input: torch.Tensor, meta=None) -> torch.Tensor:
+        """Cast activation tensor from fp8 format.
+
+        Args:
+            input (torch.Tensor): Input tensor to cast, whose dtype should be torch.float16 but with fp8 format.
+            # todo: otype now fixed to torch.float16, but in the future, it may be changed to Dtypes.QType.
+
+        Return:
+            torch.Tensor: fp16 casted tensor.
+        """
+        assert input.dtype == torch.float16, f"Currently only support activation cast from torch.float16, but got {input.dtype}."
+        if not input.is_fp8_form and not meta:
+            raise ValueError("Input tensor is not in fp8 form.")
+            return input
+        if not input.scaling_meta:
+            if meta is not None:
+                input.scaling_meta = meta
+            else:
+                warnings.warn("Input scaling meta is not set. This may cause unexpected behavior. Please check scaling meta is correctly set when using FP8 activation.")
+                from msamp.common.tensor import ScalingMeta
+                input.scaling_meta = ScalingMeta(Dtypes.kfloat8_e4m3)
+        return TypeCast.cast_from_fp8(input.view(dtype=torch.uint8), input.scaling_meta, Dtypes.kfloat16)

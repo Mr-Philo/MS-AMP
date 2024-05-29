@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from msamp.common.dtype import Dtypes
-from msamp.common.tensor import ScalingTensor, ScalingMeta
+from msamp.common.tensor import ScalingTensor, TypeCast
 from msamp.operators.gemm import Gemm
 from msamp.nn.state import model_state
 from msamp.nn.parameter import ScalingParameter
@@ -85,13 +85,7 @@ class _FP8GemmFunction(torch.autograd.Function):
         ctx.true_out_shape = out.shape
         
         if ctx.enabling_fp8_activation:
-            out = out.cast(Dtypes.kfloat8_e4m3, meta=metas['output'])
-            out_meta = out.meta
-            ctx.out_meta = out_meta
-            out = out.value.view(dtype=torch.float16)          # maintain the grad_fn
-            out.scaling_meta = out_meta
-            out.is_fp8_form = True
-            # ctx.mark_non_differentiable(out_meta)
+            out = TypeCast.cast_to_fp8_activation(out, Dtypes.kfloat8_e4m3, meta=metas['output'])
             return out
         
         return out
