@@ -9,13 +9,13 @@ import torch.nn.functional as F
 from msamp.common.dtype import Dtypes
 from msamp.common.utils import Device
 from msamp.common.utils import TransformerEngineWrapper as tew
-from msamp.common.tensor import ScalingTensor
+from msamp.common.tensor import ScalingTensor, ScalingMeta
 
 
 class Gemm:
     """GEMM class to support FP8 precision."""
     _cublas_workspace = None
-    _empty_tensor = torch.Tensor()
+    _empty_tensor = torch.empty(0, dtype=torch.float16)
     _te_base = 16
 
     @staticmethod
@@ -116,6 +116,15 @@ class Gemm:
             assert out.is_cuda and out.is_contiguous()
 
         bias = (bias if bias is not None else cls._empty_tensor)
+        
+        # for FP8 output
+        if Dtypes.is_fp8_qtype(out_qtype):
+            out_meta = ScalingMeta(out_qtype)
+            out_scale = out_meta.scale
+            out_amax = out_meta.amax
+        else:
+            out_scale = cls._empty_tensor
+            out_amax = cls._empty_tensor
 
         # here out is padded, and src_out is the original one.
         if Device.is_fp8_supported():
@@ -129,9 +138,9 @@ class Gemm:
                 b_meta.qtype,
                 False,    # transb
                 out,
-                cls._empty_tensor,    # scale
+                out_scale,    # scale
                 out_qtype,
-                cls._empty_tensor,    # amax
+                out_amax,    # amax
                 bias,
                 Dtypes.dtype_to_qtype[bias.dtype],
                 cls._empty_tensor,
@@ -144,6 +153,7 @@ class Gemm:
             )
         else:
             # do gemm on device that doesn't supported fp8.
+            assert not Dtypes.is_fp8_qtype(out_qtype), "FP8 activation output is not supported on this device."
             mat_a, mat_b = mat_a.to(out_dtype), mat_b.to(out_dtype)
             tew.te_gemm(
                 mat_a,
@@ -176,4 +186,8 @@ class Gemm:
                 out = src_out
             else:
                 out = out.contiguous()
+                
+        if Dtypes.is_fp8_qtype(out_qtype):
+            out = ScalingTensor(out, out_meta)
+        
         return out

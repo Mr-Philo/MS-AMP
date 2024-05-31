@@ -68,16 +68,29 @@ class _FP8GemmFunction(torch.autograd.Function):
         ctx.weight_fp8 = weight_fp8
         ctx.weight = weight
 
-        output_dtype = dtype_holder.dtype
-        output_qtype = Dtypes.dtype_to_qtype[output_dtype]
-
-        ctx.output_dtype = output_dtype
-        ctx.output_qtype = output_qtype
         ctx.enabling_fp8_activation = enabling_fp8_activation
+        
+        if not enabling_fp8_activation:
+            output_dtype = dtype_holder.dtype
+            output_qtype = Dtypes.dtype_to_qtype[output_dtype]
+            
+            ctx.output_dtype = output_dtype
+            ctx.output_qtype = output_qtype
+            
+            out = Gemm.fp8_gemm(weight_fp8, input_fp8, output_qtype, use_split_accumulator=False)       # return torch.Tensor
+            if bias is not None:
+                out = out + bias.type(output_dtype).view(1, -1)
+        else:
+            output_qtype = Dtypes.kfloat8_e4m3
+            ctx.output_dtype = torch.float16
+            ctx.output_qtype = output_qtype
 
-        out = Gemm.fp8_gemm(weight_fp8, input_fp8, output_qtype, use_split_accumulator=False)
-        if bias is not None:
-            out = out + bias.type(output_dtype).view(1, -1)
+            bias = bias.to(torch.float16) if (bias and bias.dtype == torch.float32) else bias
+            out = Gemm.fp8_gemm(weight_fp8, input_fp8, output_qtype, bias, use_split_accumulator=False)        # return ScalingTensor
+            
+            #! assertion 1: bias cannot be in fp32 form
+            #! assertion 2: output_qtype should be in the same form as the bias. In other words, if input is fp32, bias is fp16, gemm will fail.
+
         ctx.gemm_out_shape = out.shape
         
         if len(ctx.inp_shape) != 2:
@@ -85,7 +98,11 @@ class _FP8GemmFunction(torch.autograd.Function):
         ctx.true_out_shape = out.shape
         
         if ctx.enabling_fp8_activation:
-            out = TypeCast.cast_to_fp8_activation(out, Dtypes.kfloat8_e4m3, meta=metas['output'])
+            # out = TypeCast.cast_to_fp8_activation(out, Dtypes.kfloat8_e4m3, meta=metas['output'])
+            out_meta = out.meta
+            out = out.value.view(dtype=torch.float16)
+            out.scaling_meta = out_meta
+            out.is_fp8_form = True
             return out
         
         return out
@@ -142,14 +159,10 @@ class _FP8GemmFunction(torch.autograd.Function):
 
         if ctx.input_fp8.requires_grad:
             weight_fp8_t = ctx.weight_fp8.fp8_transpose()
-            input_grad = Gemm.fp8_gemm(weight_fp8_t, ograd_fp8, ctx.output_qtype, use_split_accumulator=True)
-            # print(f">>> In _FP8GemmFunction.backward, input_grad for return: {input_grad} (before quant)")    #! temporary
             
-            # 如果input被view了(uint8->fp16)，那么这里的input_grad也应该是view的
-            # 为什么：torch auto grad要求grad的shape和input的shape一致。
-            # 例如：input为[3,8]uint8型被view成了[3,4]fp16型，这里计算出来的input_grad是拿view back的[3,8]uint8型计算的
-            # 所以算出的input_grad是[3,8]fp16型，这个数值在理论上是正确的，但形式上不符合torch.autograd的要求
-            # 所以这里需要把input_gradview到[3,4]fp32型（与view后的input形状保持一致），下次计算的时候再view回[3,8]fp16型
+            output_qtype = Dtypes.kfloat8_e5m2 if Dtypes.is_fp8_qtype(ctx.output_qtype) else ctx.output_qtype
+            input_grad = Gemm.fp8_gemm(weight_fp8_t, ograd_fp8, output_qtype, use_split_accumulator=True)
+            # print(f">>> In _FP8GemmFunction.backward, input_grad for return: {input_grad} (before quant)")    #! temporary
             
             # deal with input shape other than [batch, feature]
             if len(ctx.true_out_shape) != 2:
@@ -157,11 +170,16 @@ class _FP8GemmFunction(torch.autograd.Function):
             
             if ctx.enabling_fp8_activation:
                 #! add activation grad quantization
-                input_grad_scaling_tensor = input_grad.cast(Dtypes.kfloat8_e5m2, meta=metas['agrad'])       # step1: quantize
-                input_grad = input_grad_scaling_tensor.value                                 # step2: get torch.tensor (uint8)
-                input_grad = input_grad.view(dtype=torch.float16)                            # step3: uint8 view to fp16: #!shape[-1] reduced by half
-                input_grad.scaling_meta = input_grad_scaling_tensor.meta                     # step4: set scaling meta, see torch.tensor.overrider
-                input_grad.is_fp8_form = True                                                # step5: set flag
+                # input_grad_scaling_tensor = input_grad.cast(Dtypes.kfloat8_e5m2, meta=metas['agrad'])       # step1: quantize
+                # input_grad = input_grad_scaling_tensor.value                                 # step2: get torch.tensor (uint8)
+                # input_grad = input_grad.view(dtype=torch.float16)                            # step3: uint8 view to fp16: #!shape[-1] reduced by half
+                # input_grad.scaling_meta = input_grad_scaling_tensor.meta                     # step4: set scaling meta, see torch.tensor.overrider
+                # input_grad.is_fp8_form = True                                                # step5: set flag
+                
+                input_grad_meta = input_grad.meta
+                input_grad = input_grad.value.view(dtype=torch.float16)
+                input_grad.scaling_meta = input_grad_meta
+                input_grad.is_fp8_form = True
         else:
             input_grad = None
 
@@ -180,6 +198,7 @@ class _FP8GemmFunction(torch.autograd.Function):
                 )
             else:
                 # gradient accumulation, old_wgrad is FP32 or FP16 without tensor scaling.
+                # todo: how to deal when ctx.output_dtype is FP8e4m3 or FP8e5m2
                 old_wgrad = ctx.weight.grad.to(ctx.output_dtype)
                 wgrad = Gemm.fp8_gemm(
                     input_fp8_t,
@@ -191,15 +210,18 @@ class _FP8GemmFunction(torch.autograd.Function):
                 )
                 del old_wgrad
             if hasattr(ctx, 'return_wgrad') and ctx.return_wgrad:
-                wgrad = wgrad.cast(Dtypes.kfloat8_e4m3, meta=wgrad_meta, sync=True)
+                if not isinstance(wgrad, ScalingTensor):
+                    wgrad = wgrad.cast(Dtypes.kfloat8_e4m3, meta=wgrad_meta, sync=True)
                 wgrad = wgrad.value.view(-1).view(dtype=torch.float32)
                 wgrad.meta = wgrad_meta
                 return input_grad, wgrad, None, None, None, None
             elif model_state.use_fp8_ddp:
+                # todo: how to deal with this case when wgrad is a ScalingTensor
                 wgrad.meta = wgrad_meta
             else:
                 # wgrad above this line is torch.Tensor w/o tensor scaling
-                wgrad = wgrad.cast(Dtypes.kfloat8_e4m3, meta=wgrad_meta, sync=True)
+                if not isinstance(wgrad, ScalingTensor):
+                    wgrad = wgrad.cast(Dtypes.kfloat8_e4m3, meta=wgrad_meta, sync=True)
 
             ctx.weight.backward_grad_update(wgrad)
 

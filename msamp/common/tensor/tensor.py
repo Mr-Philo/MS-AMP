@@ -416,6 +416,17 @@ meta.dtype is {meta_dtype} (meta.qtype is {meta.qtype}).'
             ScalingTensor: a new ScalingTensor object whose value tensor is flattened.
         """
         return ScalingTensor(self.value.flatten(), self.meta)
+    
+    def view(self, *args):
+        """View tensor.
+
+        Args:
+            *args: arguments.
+
+        Return:
+            ScalingTensor: a new ScalingTensor object whose value tensor is viewed.
+        """
+        return ScalingTensor(self.value.view(*args), self.meta)
 
     @property
     def is_cuda(self):
