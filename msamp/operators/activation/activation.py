@@ -128,28 +128,29 @@ class _ReluFunction(torch.autograd.Function):
     def forward(ctx, inp: torch.Tensor) -> torch.Tensor:
         
         assert inp.is_fp8_form, "This _ReluFunction should only be called with FP8 input. Please check if the input tensor is in FP8 form."
-        inp = TypeCast.cast_from_fp8_activation(inp)
+        meta = inp.scaling_meta
+        inp = inp.view(dtype=torch.int8)
+        ctx.save_for_backward(inp)
         
-        out = torch.nn.functional.relu(inp)
-        out = TypeCast.cast_to_fp8_activation(out, Dtypes.kfloat8_e4m3)
-        # ctx.saved_out = out     #! this will cause large memory overhead
-        ctx.scaling_meta = out.scaling_meta
-        ctx.save_for_backward(out)
-        
-        return out
+        inp = inp.clamp(min=0).view(dtype=torch.float16)
+        inp.scaling_meta = meta
+        inp.is_fp8_form = True
+
+        return inp
     
     @staticmethod
     def backward(ctx, grad_output):
         assert grad_output.is_fp8_form, "This _ReluFunction backward should only be called with FP8 grdient. Please check if the gradient back from next layer is in FP8 form."
-        grad_output = TypeCast.cast_from_fp8_activation(grad_output)
-        # out = TypeCast.cast_from_fp8_activation(ctx.saved_out)
-        out, = ctx.saved_tensors
-        out = TypeCast.cast_from_fp8_activation(out, ctx.scaling_meta)
+        meta = grad_output.scaling_meta
         
-        grad_input = grad_output.clone()
-        grad_input[out <= 0] = 0
+        grad_input = grad_output.view(dtype=torch.int8)
+        inp, = ctx.saved_tensors
+        grad_input[inp <= 0] = 0
+        grad_input = grad_input.view(dtype=torch.float16)
+        grad_input.scaling_meta = meta
+        grad_input.is_fp8_form = True
                 
-        return TypeCast.cast_to_fp8_activation(grad_input, Dtypes.kfloat8_e5m2)
+        return grad_input
     
     
 class _DropoutFunction(torch.autograd.Function):  
@@ -158,28 +159,42 @@ class _DropoutFunction(torch.autograd.Function):
     @staticmethod  
     def forward(ctx, inp: torch.Tensor, p: float, training: bool = True) -> torch.Tensor:  
         assert inp.is_fp8_form, "This _DropoutFunction should only be called with FP8 input. Please check if the input tensor is in FP8 form."  
-        inp = TypeCast.cast_from_fp8_activation(inp)
+        meta = inp.scaling_meta
+        inp = inp.view(dtype=torch.uint8)
           
         if training:  
-            mask = (torch.rand_like(inp) > p).float() / (1 - p)  
+            mask = (torch.rand(inp.shape) > p).to(torch.uint8).to(inp.device)
             out = inp * mask  
+            meta.amax = meta.amax / (1 - p)     #? only update amax is enough?
             ctx.save_for_backward(mask)  
+            ctx.p = p
         else:  
             out = inp  
-            
-        return TypeCast.cast_to_fp8_activation(out, Dtypes.kfloat8_e4m3)
+        
+        out = out.view(dtype=torch.float16)
+        out.scaling_meta = meta
+        out.is_fp8_form = True    
+        return out
   
     @staticmethod  
     def backward(ctx, grad_output):  
         assert grad_output.is_fp8_form, "This _DropoutFunction backward should only be called with FP8 gradient. Please check if the gradient back from next layer is in FP8 form."  
-        grad_output = TypeCast.cast_from_fp8_activation(grad_output)
+        meta = grad_output.scaling_meta
+        grad_output = grad_output.view(dtype=torch.uint8)
           
         mask, = ctx.saved_tensors 
+        # we multiply the factor 1/(1-p) on scaling_meta to avoid accuracy loss on integer multiplication, only multiply [0,1] mask on the int tensor
+        mask[mask != 0] = 1
+        mask = mask.to(torch.uint8).to(grad_output.device)
+        meta.amax = meta.amax / (1 - ctx.p)     #? only update amax is enough?
           
         # Compute gradient input  
         grad_input = grad_output * mask  
-          
-        return TypeCast.cast_to_fp8_activation(grad_input, Dtypes.kfloat8_e5m2), None, None
+        
+        grad_input = grad_input.view(dtype=torch.float16)
+        grad_input.scaling_meta = meta
+        grad_input.is_fp8_form = True
+        return grad_input, None, None
     
 
 class _LogSoftmaxFunction(torch.autograd.Function):  
