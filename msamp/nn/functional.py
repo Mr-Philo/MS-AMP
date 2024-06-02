@@ -85,7 +85,7 @@ class _FP8GemmFunction(torch.autograd.Function):
             ctx.output_dtype = torch.float16
             ctx.output_qtype = output_qtype
 
-            bias = bias.to(torch.float16) if (bias and bias.dtype == torch.float32) else bias
+            bias = bias.to(torch.float16) if ((bias is not None) and bias.dtype == torch.float32) else bias
             out = Gemm.fp8_gemm(weight_fp8, input_fp8, output_qtype, bias, use_split_accumulator=False)        # return ScalingTensor
             
             #! assertion 1: bias cannot be in fp32 form
@@ -198,8 +198,9 @@ class _FP8GemmFunction(torch.autograd.Function):
                 )
             else:
                 # gradient accumulation, old_wgrad is FP32 or FP16 without tensor scaling.
-                # todo: how to deal when ctx.output_dtype is FP8e4m3 or FP8e5m2
+                # currently cublas_gemm with accumulation mode is not supported with FP8 GEMM output
                 old_wgrad = ctx.weight.grad.to(ctx.output_dtype)
+                wgrad_qtype = Dtypes.kfloat16 if Dtypes.is_fp8_qtype(ctx.output_qtype) else ctx.output_qtype
                 wgrad = Gemm.fp8_gemm(
                     input_fp8_t,
                     ograd_fp8_t,
