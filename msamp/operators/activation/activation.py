@@ -235,20 +235,28 @@ class _FlattenFunction(torch.autograd.Function):
     @staticmethod  
     def forward(ctx, inp: torch.Tensor, start_dim: int = 0, end_dim: int = -1) -> torch.Tensor:  
         assert inp.is_fp8_form, "This _FlattenFunction should only be called with FP8 input. Please check if the input tensor is in FP8 form."  
-        inp = TypeCast.cast_from_fp8_activation(inp)
+        meta = inp.scaling_meta
+        inp = inp.view(dtype=torch.uint8)
         ctx.original_shape = inp.shape
           
-        out = torch.flatten(inp, start_dim=start_dim, end_dim=end_dim)
-        return TypeCast.cast_to_fp8_activation(out, Dtypes.kfloat8_e4m3)  
+        out = torch.flatten(inp, start_dim=start_dim, end_dim=end_dim).view(dtype=torch.float16)
+        out.scaling_meta = meta
+        out.is_fp8_form = True
+        
+        return out 
   
     @staticmethod  
     def backward(ctx, grad_output):  
         assert grad_output.is_fp8_form, "This _FlattenFunction backward should only be called with FP8 gradient. Please check if the gradient back from next layer is in FP8 form."  
-        grad_output = TypeCast.cast_from_fp8_activation(grad_output)
+        meta = grad_output.scaling_meta
+        grad_output = grad_output.view(dtype=torch.uint8)
           
-        grad_input = grad_output.view(ctx.original_shape)  
+        grad_input = grad_output.view(ctx.original_shape)
+        grad_input = grad_input.view(dtype=torch.float16)
+        grad_input.scaling_meta = meta
+        grad_input.is_fp8_form = True
           
-        return TypeCast.cast_to_fp8_activation(grad_input, Dtypes.kfloat8_e5m2), None, None
+        return grad_input, None, None
     
 
 class _MaxPool2DFunction(torch.autograd.Function):  
