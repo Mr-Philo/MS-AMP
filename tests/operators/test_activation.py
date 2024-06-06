@@ -12,7 +12,7 @@ import torch.nn.grad
 from tests.helper import decorator
 from msamp.common.dtype import Dtypes
 from msamp.nn import LinearReplacer
-from msamp.operators.activation import Activation
+from msamp.operators.activation import Activation, ScalingGelu, ScalingLayerNorm, ScalingDropout
 from msamp.common.tensor import TypeCast, ScalingMeta
 from msamp.operators.loss_fn import Loss_fn
 
@@ -31,6 +31,41 @@ class ActivationTestClass(unittest.TestCase):
         """Hook method for deconstructing the test fixture after testing it."""
         pass
     
+    @staticmethod
+    def standard_sequential_model_valid(model):
+        '''Test the standard sequential model with fp16 and fp8 activation.'''
+        
+        input = torch.randn((3, 4), dtype=torch.float16, device='cuda')
+        print("------------For fp16 activation model------------")
+        torch.manual_seed(42)
+        model1 = copy.deepcopy(model)
+        model1 = LinearReplacer.replace(model1, Dtypes.kfloat16)
+        print(model1)
+        output1 = model1(input)
+        print(f"fp16 model output: {output1}, with dtype: {output1.dtype}, requires_grad: {output1.requires_grad}")
+        
+        print("------------For fp8 activation model------------")
+        torch.manual_seed(42)
+        model2 = copy.deepcopy(model)
+        model2 = LinearReplacer.replace(model2, Dtypes.kfloat16, enabling_fp8_activation=True)
+        print(model2)
+        output2 = model2(input)
+        assert output2.is_fp8_form == True
+        print(f"fp8 model output: {output2}, with dtype: {output2.dtype}, requires_grad: {output2.requires_grad}, scaling_meta: {output2.scaling_meta}")        
+        print(f"difference: {output1 - TypeCast.cast_from_fp8_activation(output2)}")
+        
+        # backward
+        loss1 = Loss_fn.sum(output1)
+        loss1.backward()
+        layer = model1.linear1 if hasattr(model1, 'linear1') else model1.linear
+        print(f"fp16 model weight grad: {layer.weight.grad}, with dtype: {layer.weight.grad.dtype}, with requires_grad: {layer.weight.grad._requires_grad}")
+        loss2 = Loss_fn.sum(output2)
+        loss2.backward()
+        print(f"fp8 model weight grad: {layer.weight.grad}, with dtype: {layer.weight.grad.dtype}, with requires_grad: {layer.weight.grad._requires_grad}")
+        
+        assert layer.weight.grad.shape == layer.weight.grad.shape, f"Weight grad shape should be the same as model weight shape {layer.weight.grad.shape}, but got {layer.weight.grad.shape}"
+        
+        
     @decorator.cuda_test
     def test_gelu(self):
         '''Test the function Activation.gelu().'''
@@ -142,6 +177,27 @@ class ActivationTestClass(unittest.TestCase):
         
         # python -m unittest tests.operators.test_activation.ActivationTestClass.test_gelu_backward
         
+    @decorator.cuda_test
+    def test_module_gelu(self):
+        '''Test ScalingGelu module.'''
+        
+        class MyModel(torch.nn.Module):
+            def __init__(self):
+                super(MyModel, self).__init__()
+                self.linear = torch.nn.Linear(4, 8, bias=False)
+                self.gelu = ScalingGelu()
+                
+            def forward(self, x):
+                x = self.linear(x)
+                x = self.gelu(x)
+                return x
+            
+        model = MyModel().cuda()
+        ActivationTestClass.standard_sequential_model_valid(model)
+        
+        # python -m unittest tests.operators.test_activation.ActivationTestClass.test_module_gelu
+        
+    @decorator.cuda_test    
     def test_relu_backward(self):
         '''Test the backward function Activation.relu().'''
         input = torch.randn((3, 4), dtype=torch.float16, device='cuda')
@@ -248,7 +304,9 @@ class ActivationTestClass(unittest.TestCase):
             def forward(self, x):
                 x = self.linear1(x)
                 torch.manual_seed(42)
+                # print(f"x before dropout: {TypeCast.cast_from_fp8_activation(x) if x.is_fp8_form else x}, meta: {x.scaling_meta}")
                 x = Activation.dropout(x, 0.5)
+                # print(f"x after dropout: {TypeCast.cast_from_fp8_activation(x) if x.is_fp8_form else x}, meta: {x.scaling_meta}")
                 x = self.linear2(x)
                 torch.manual_seed(42)
                 x = Activation.dropout(x, 0.5)
@@ -426,3 +484,55 @@ class ActivationTestClass(unittest.TestCase):
         assert model2.linear.weight.grad.shape == model1.linear.weight.grad.shape, f"Weight grad shape should be the same as model weight shape {model2.linear.weight.grad.shape}, but got {model1.linear.weight.grad.shape}"
         
         # python -m unittest tests.operators.test_activation.ActivationTestClass.test_sequential_max_pool2d_and_backward
+    
+    @decorator.cuda_test
+    def test_module_layernorm(self):
+        '''Test ScalingLayerNorm module.'''
+        
+        class MyModel(torch.nn.Module):
+            def __init__(self):
+                super(MyModel, self).__init__()
+                self.linear1 = torch.nn.Linear(4, 8)
+                self.norm1 = ScalingLayerNorm(8)
+                self.linear2 = torch.nn.Linear(8, 16)
+                self.norm2 = ScalingLayerNorm(16)
+                self.linear3 = torch.nn.Linear(16, 4)
+                
+            def forward(self, x):
+                x = self.linear1(x)
+                x = self.norm1(x)
+                x = self.linear2(x)
+                x = self.norm2(x)
+                x = self.linear3(x)
+                return x
+            
+        model = MyModel().half().cuda()
+        ActivationTestClass.standard_sequential_model_valid(model)
+        
+        # python -m unittest tests.operators.test_activation.ActivationTestClass.test_module_layernorm
+        
+    @decorator.cuda_test
+    def test_module_dropout(self):
+        '''Test ScalingDropout module.'''
+        
+        class MyModel(torch.nn.Module):
+            def __init__(self):
+                super(MyModel, self).__init__()
+                self.linear1 = torch.nn.Linear(4, 8)
+                self.dropout1 = ScalingDropout(0.5)
+                self.linear2 = torch.nn.Linear(8, 16)
+                self.dropout2 = ScalingDropout(0.5)
+                self.linear3 = torch.nn.Linear(16, 4)
+                
+            def forward(self, x):
+                x = self.linear1(x)
+                x = self.dropout1(x)
+                x = self.linear2(x)
+                x = self.dropout2(x)
+                x = self.linear3(x)
+                return x
+            
+        model = MyModel().half().cuda()
+        ActivationTestClass.standard_sequential_model_valid(model)
+        
+        # python -m unittest tests.operators.test_activation.ActivationTestClass.test_module_dropout

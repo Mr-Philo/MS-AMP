@@ -51,8 +51,48 @@ class FP8ActivationWrapper(torch.nn.Module):
         return f"FP8ActivationWrapper({self.module})"
 '''    
     
-class _GeluFunction(torch.autograd.Function):
-    '''Gelu function for FP8 input and output.'''
+    
+class _FP16toFP8CastFunction(torch.autograd.Function):
+    '''Cast function for FP16 input and FP8 output.'''
+    @staticmethod
+    def forward(ctx, inp: torch.Tensor) -> torch.Tensor:
+        '''FP16 activation to FP8 activation (in FP16 form)
+        
+        shape: (B, L, D) -> (B, L, D/2)
+        '''
+        return TypeCast.cast_to_fp8_activation(inp, Dtypes.kfloat8_e4m3)
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        '''FP8 gradient (in FP16 form) to FP16 gradient
+        
+        shape: (B, L, D/2) -> (B, L, D)
+        '''
+        # print("hahaha!")      #! temp
+        return TypeCast.cast_from_fp8_activation(grad_output)
+
+
+class _FP8toFP16CastFunction(torch.autograd.Function):
+    '''Cast function for FP8 input and FP16 output.'''
+    @staticmethod
+    def forward(ctx, inp: torch.Tensor) -> torch.Tensor:
+        '''FP8 activation (in FP16 form) to FP16 activation
+        
+        shape: (B, L, D) -> (B, L, 2*D)
+        '''
+        return TypeCast.cast_from_fp8_activation(inp)
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        '''FP16 gradient to FP8 gradient (in FP16 form)
+        
+        shape: (B, L, 2*D) -> (B, L, D)
+        '''
+        return TypeCast.cast_to_fp8_activation(grad_output, Dtypes.kfloat8_e5m2)
+    
+        
+class _TEGeluFunction(torch.autograd.Function):
+    '''Gelu function for FP8 input and output, using Transformer Engine'''
     @staticmethod
     def forward(ctx, inp: torch.Tensor) -> torch.Tensor:
         
@@ -66,7 +106,7 @@ class _GeluFunction(torch.autograd.Function):
             raise RuntimeError("FP8 activation output is not supported on this device.")
         
         out_meta = ScalingMeta(Dtypes.kfloat8_e4m3) 
-        # print(f"before te_gelu: out_meta: {out_meta}, out_qtype: {out_qtype}")      #! temp
+        print(f"before te_gelu: out_meta: {out_meta}, out_qtype: {out_qtype}")      #! temp
         out = tew.te_gelu(
             inp,                    # inp
             out_meta.scale,         # scale
@@ -74,7 +114,8 @@ class _GeluFunction(torch.autograd.Function):
             out_meta.scale_inv,     # scale_inv
             out_qtype,              # otype. Here should input msamp.common.dtype.QType, then automatically convert to tex.DType. For example: Dtypes.kfloat16 = QType(name='kFloat16', value=3) --> <DType.kFloat16: 4> 
         )
-        # print(f"after te_gelu: out_meta: {out_meta}, out_qtype: {out_qtype}")       #! temp
+        print(f"after te_gelu: out_meta: {out_meta}, out_qtype: {out_qtype}")       #! temp
+        #! scale and scale_inv not changed, amax changes
         
         out = out.view(dtype=torch.float16)
         out.scaling_meta = out_meta
@@ -120,6 +161,33 @@ class _GeluFunction(torch.autograd.Function):
         input_grad.scaling_meta = input_grad_scaling_tensor.meta
         input_grad.is_fp8_form = True
         return input_grad
+    
+    
+class _GeluFunction(torch.autograd.Function):
+    '''Gelu function for FP8 input and output.'''
+    def forward(ctx, inp: torch.Tensor) -> torch.Tensor:
+        
+        assert inp.is_fp8_form, "This _GeluFunction should only be called with FP8 input. Please check if the input tensor is in FP8 form."
+        inp = TypeCast.cast_from_fp8_activation(inp)
+        
+        out = torch.nn.functional.gelu(inp)
+        out = TypeCast.cast_to_fp8_activation(out, Dtypes.kfloat8_e4m3)
+        
+        ctx.save_for_backward(out)
+        ctx.scaling_meta = out.scaling_meta
+        
+        return out
+    
+    def backward(ctx, grad_output):
+        assert grad_output.is_fp8_form, "This _GeluFunction backward should only be called with FP8 grdient. Please check if the gradient back from next layer is in FP8 form."
+        grad_output = TypeCast.cast_from_fp8_activation(grad_output)
+        
+        out, = ctx.saved_tensors
+        out = TypeCast.cast_from_fp8_activation(out, ctx.scaling_meta)
+        
+        grad_input = grad_output * (0.5 * (1.0 + torch.erf(out / torch.sqrt(torch.tensor(2.0)))) + 
+                                   (out * torch.exp(-out**2 / 2.0) / torch.sqrt(torch.tensor(2.0 * torch.pi))))
+        return TypeCast.cast_to_fp8_activation(grad_input, Dtypes.kfloat8_e5m2)
 
 
 class _ReluFunction(torch.autograd.Function):
@@ -165,7 +233,8 @@ class _DropoutFunction(torch.autograd.Function):
         if training:  
             mask = (torch.rand(inp.shape) > p).to(torch.uint8).to(inp.device)
             out = inp * mask  
-            meta.amax = meta.amax / (1 - p)     #? only update amax is enough?
+            # meta.amax = meta.amax / (1 - p)     #? only update amax is enough?
+            meta.scale_inv = meta.scale_inv / (1 - p)     #? only update scale_inv is enough?
             ctx.save_for_backward(mask)  
             ctx.p = p
         else:  
@@ -186,7 +255,8 @@ class _DropoutFunction(torch.autograd.Function):
         # we multiply the factor 1/(1-p) on scaling_meta to avoid accuracy loss on integer multiplication, only multiply [0,1] mask on the int tensor
         mask[mask != 0] = 1
         mask = mask.to(torch.uint8).to(grad_output.device)
-        meta.amax = meta.amax / (1 - ctx.p)     #? only update amax is enough?
+        # meta.amax = meta.amax / (1 - ctx.p)     #? only update amax is enough?
+        meta.scale_inv = meta.scale_inv / (1 - ctx.p)     #? only update scale_inv is enough?
           
         # Compute gradient input  
         grad_input = grad_output * mask  
@@ -326,14 +396,17 @@ class _Conv2dFunction(torch.autograd.Function):
     
         
 class Activation:
-    """Activation class to support FP8 precision"""
+    """ User-facing functions to support FP8 precision"""
     _empty_tensor = torch.Tensor()
     
     @classmethod
     def gelu(cls, inp: torch.Tensor)-> torch.Tensor:
         """GeLU activation function to support FP8 precision"""
         if inp.is_fp8_form:   
-            return _GeluFunction.apply(inp)
+            # return _GeluFunction.apply(inp)
+            inp = _FP8toFP16CastFunction.apply(inp)
+            out = torch.nn.functional.gelu(inp)
+            return _FP16toFP8CastFunction.apply(out)
         else:
             return torch.nn.functional.gelu(inp)
     
@@ -376,6 +449,50 @@ class Activation:
             return _MaxPool2DFunction.apply(inp, kernel_size, stride, padding, dilation, ceil_mode)  
         else:  
             return torch.nn.functional.max_pool2d(inp, kernel_size, stride, padding, dilation, ceil_mode)
+
+
+class ScalingGelu(torch.nn.GELU):
+    '''User-facing Gelu module to support FP8 precision'''
+    def __init__(self):
+        super(ScalingGelu, self).__init__()
+        
+    def forward(self, inp):
+        if inp.is_fp8_form:
+            inp = _FP8toFP16CastFunction.apply(inp)
+            out = super(ScalingGelu, self).forward(inp)
+            return _FP16toFP8CastFunction.apply(out)
+        else:
+            return super(ScalingGelu, self).forward(inp)
+        
+
+class ScalingDropout(torch.nn.Dropout):
+    '''User-facing Dropout module to support FP8 precision'''
+    def __init__(self, p=0.5, inplace=False):
+        super(ScalingDropout, self).__init__(p, inplace)
+        
+    def forward(self, inp):
+        if inp.is_fp8_form:
+            #! although this _DropoutFunction gets rid of the precision cast, but it still has some numerical problems, thus don't use (2024.6.6)
+            # return _DropoutFunction.apply(inp, self.p, self.training)
+            inp = _FP8toFP16CastFunction.apply(inp)
+            out = super(ScalingDropout, self).forward(inp)
+            return _FP16toFP8CastFunction.apply(out)
+        else:
+            return super(ScalingDropout, self).forward(inp)
+
+
+class ScalingLayerNorm(torch.nn.LayerNorm):
+    '''User-facing LayerNorm module to support FP8 precision'''
+    def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True):
+        super(ScalingLayerNorm, self).__init__(normalized_shape, eps, elementwise_affine)
+        
+    def forward(self, inp):
+        if inp.is_fp8_form:
+            inp = _FP8toFP16CastFunction.apply(inp)
+            out = super(ScalingLayerNorm, self).forward(inp)
+            return _FP16toFP8CastFunction.apply(out)
+        else:
+            return super(ScalingLayerNorm, self).forward(inp)
 
 
 ''' # temporarily not use
