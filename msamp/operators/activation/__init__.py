@@ -3,6 +3,6 @@
 
 """Exposes the interface of MS-AMP activation function module."""
 
-from msamp.operators.activation.activation import Activation, ScalingGelu, ScalingLayerNorm, ScalingDropout
+from msamp.operators.activation.activation import Activation, ActivationReplacer
 
-__all__ = ['Activation', 'ScalingGelu', 'ScalingLayerNorm', 'ScalingDropout']
+__all__ = ['Activation', 'ActivationReplacer']

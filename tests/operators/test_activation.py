@@ -12,7 +12,7 @@ import torch.nn.grad
 from tests.helper import decorator
 from msamp.common.dtype import Dtypes
 from msamp.nn import LinearReplacer
-from msamp.operators.activation import Activation, ScalingGelu, ScalingLayerNorm, ScalingDropout
+from msamp.operators.activation import Activation, ActivationReplacer
 from msamp.common.tensor import TypeCast, ScalingMeta
 from msamp.operators.loss_fn import Loss_fn
 
@@ -185,7 +185,7 @@ class ActivationTestClass(unittest.TestCase):
             def __init__(self):
                 super(MyModel, self).__init__()
                 self.linear = torch.nn.Linear(4, 8, bias=False)
-                self.gelu = ScalingGelu()
+                self.gelu = torch.nn.GELU()
                 
             def forward(self, x):
                 x = self.linear(x)
@@ -193,6 +193,7 @@ class ActivationTestClass(unittest.TestCase):
                 return x
             
         model = MyModel().cuda()
+        model = ActivationReplacer.replace(model)
         ActivationTestClass.standard_sequential_model_valid(model)
         
         # python -m unittest tests.operators.test_activation.ActivationTestClass.test_module_gelu
@@ -493,9 +494,9 @@ class ActivationTestClass(unittest.TestCase):
             def __init__(self):
                 super(MyModel, self).__init__()
                 self.linear1 = torch.nn.Linear(4, 8)
-                self.norm1 = ScalingLayerNorm(8)
+                self.norm1 = torch.nn.LayerNorm(8)
                 self.linear2 = torch.nn.Linear(8, 16)
-                self.norm2 = ScalingLayerNorm(16)
+                self.norm2 = torch.nn.LayerNorm(16)
                 self.linear3 = torch.nn.Linear(16, 4)
                 
             def forward(self, x):
@@ -507,6 +508,7 @@ class ActivationTestClass(unittest.TestCase):
                 return x
             
         model = MyModel().half().cuda()
+        model = ActivationReplacer.replace(model)
         ActivationTestClass.standard_sequential_model_valid(model)
         
         # python -m unittest tests.operators.test_activation.ActivationTestClass.test_module_layernorm
@@ -519,9 +521,9 @@ class ActivationTestClass(unittest.TestCase):
             def __init__(self):
                 super(MyModel, self).__init__()
                 self.linear1 = torch.nn.Linear(4, 8)
-                self.dropout1 = ScalingDropout(0.5)
+                self.dropout1 = torch.nn.Dropout(0.5)
                 self.linear2 = torch.nn.Linear(8, 16)
-                self.dropout2 = ScalingDropout(0.5)
+                self.dropout2 = torch.nn.Dropout(0.5)
                 self.linear3 = torch.nn.Linear(16, 4)
                 
             def forward(self, x):
@@ -533,6 +535,7 @@ class ActivationTestClass(unittest.TestCase):
                 return x
             
         model = MyModel().half().cuda()
+        model = ActivationReplacer.replace(model)
         ActivationTestClass.standard_sequential_model_valid(model)
         
         # python -m unittest tests.operators.test_activation.ActivationTestClass.test_module_dropout

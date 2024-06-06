@@ -68,7 +68,7 @@ class _FP16toFP8CastFunction(torch.autograd.Function):
         
         shape: (B, L, D/2) -> (B, L, D)
         '''
-        # print("hahaha!")      #! temp
+        print("hahaha!")      #! temp
         return TypeCast.cast_from_fp8_activation(grad_output)
 
 
@@ -518,3 +518,39 @@ class FP8Conv2DWrapper(torch.nn.Module):
         else:
             self.module.__setattr__(name, value)
 '''
+
+
+class ActivationReplacer():
+    '''A class to replace some activation functions with FP8 version'''
+    @classmethod
+    def _replace(cls, model):
+        if isinstance(model, torch.nn.LayerNorm):  
+            new_layer = ScalingLayerNorm(model.normalized_shape, model.eps, model.elementwise_affine).to(model.weight.device).to(model.weight.dtype)
+            return new_layer
+        elif isinstance(model, torch.nn.GELU):
+            new_layer = ScalingGelu()
+            return new_layer
+        elif isinstance(model, torch.nn.Dropout):
+            new_layer = ScalingDropout(model.p, model.inplace)
+            return new_layer
+        else:
+            for child_name, child in model.named_children():
+                setattr(model, child_name, cls._replace(child))
+        return model
+                
+    @classmethod
+    def replace(cls, model: torch.nn.Module) -> torch.nn.Module:
+        """Replace the operator functions with FP8-activation supported functions recursively in a model.
+
+        Currently support:
+            - torch.nn.LayerNorm
+            - torch.nn.GELU
+            - torch.nn.Dropout
+            
+        Args:
+            model (torch.nn.Module): Model to replace.
+
+        Returns:
+            model (torch.nn.Module): Model in which all operator functions are replaced with FP8 version.
+        """
+        return cls._replace(model)
