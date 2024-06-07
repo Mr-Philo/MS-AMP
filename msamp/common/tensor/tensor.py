@@ -720,6 +720,13 @@ class TorchOverider:
         
         torch.Tensor.is_fp8_form = property(cls._get_is_fp8_form, cls._set_is_fp8_form)
         torch.Tensor.scaling_meta = property(cls._get_scaling_meta, cls._set_scaling_meta)
+        
+        # Patch methods to retain custom attributes  
+        methods_to_patch = ['reshape', 'permute', 'view', 'clone', 'detach', 'transpose', 'contiguous', 'unbind']  
+        for method_name in methods_to_patch:  
+            original_method = getattr(torch.Tensor, method_name)  
+            patched_method = cls._create_patched_method(method_name, original_method)  
+            setattr(torch.Tensor, method_name, patched_method)
 
     @staticmethod
     def _get_is_fp8_form(self):
@@ -746,6 +753,29 @@ class TorchOverider:
         '''Set scaling_meta property.'''
         assert isinstance(value, ScalingMeta), 'scaling_meta must be a ScalingMeta object.'
         self._scaling_meta = value
+        
+    @staticmethod  
+    def _copy_custom_attributes(src, dest):  
+        if hasattr(src, '_is_fp8_form'):  
+            dest._is_fp8_form = src._is_fp8_form  
+        if hasattr(src, '_scaling_meta'):  
+            dest._scaling_meta = src._scaling_meta  
+  
+    @classmethod  
+    def _create_patched_method(cls, method_name, original_method):  
+        def patched_method(self, *args, **kwargs):  
+            result = original_method(self, *args, **kwargs)  
+            if method_name == 'unbind':  
+                # For unbind, result is a tuple of tensors  
+                result = tuple(  
+                    cls._copy_custom_attributes(self, r) or r  
+                    for r in result  
+                )  
+            elif isinstance(result, torch.Tensor):  
+                # For other methods, result is a single tensor  
+                cls._copy_custom_attributes(self, result)  
+            return result
+        return patched_method
 
     @classmethod
     def _override_unary_func(cls):
@@ -915,3 +945,42 @@ class TorchOverider:
 
 
 TorchOverider.override()
+
+
+if __name__ == "__main__":  
+
+    t = torch.randn(3, 4)  
+  
+    t.is_fp8_form = True  
+    t.scaling_meta = ScalingMeta(qtype=Dtypes.kfloat8_e4m3) 
+
+    reshaped_t = t.reshape(6, 2)  
+    permuted_t = t.permute(1, 0)  
+    viewed_t = t.view(2, 6)  
+    cloned_t = t.clone()  
+    detached_t = t.detach()  
+    transposed_t = t.transpose(0, 1)
+    unbound_t = t.unbind(0)  
+  
+    # Check if custom properties are retained  
+    print(f"reshaped_t.is_fp8_form: {reshaped_t.is_fp8_form}")  
+    print(f"reshaped_t.scaling_meta: {reshaped_t.scaling_meta}")  
+  
+    print(f"permuted_t.is_fp8_form: {permuted_t.is_fp8_form}")  
+    print(f"permuted_t.scaling_meta: {permuted_t.scaling_meta}")  
+  
+    print(f"viewed_t.is_fp8_form: {viewed_t.is_fp8_form}")  
+    print(f"viewed_t.scaling_meta: {viewed_t.scaling_meta}")  
+  
+    print(f"cloned_t.is_fp8_form: {cloned_t.is_fp8_form}")  
+    print(f"cloned_t.scaling_meta: {cloned_t.scaling_meta}")  
+  
+    print(f"detached_t.is_fp8_form: {detached_t.is_fp8_form}")  
+    print(f"detached_t.scaling_meta: {detached_t.scaling_meta}")  
+  
+    print(f"transposed_t.is_fp8_form: {transposed_t.is_fp8_form}")  
+    print(f"transposed_t.scaling_meta: {transposed_t.scaling_meta}")  
+    
+    for i, ut in enumerate(unbound_t):  
+        print(f"unbound_t[{i}].is_fp8_form: {ut.is_fp8_form}")  
+        print(f"unbound_t[{i}].scaling_meta: {ut.scaling_meta}") 

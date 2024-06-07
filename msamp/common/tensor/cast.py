@@ -149,7 +149,7 @@ class TypeCast:
         Return:
             torch.Tensor: tensor whose dtype is torch.float16 but with fp8 format.
         """
-        # assert input.dtype == torch.float16, f"Currently only support activation cast from torch.float16, but got {input.dtype}."
+        assert input.dtype == torch.float16, f"Currently only support activation cast from torch.float16, but got {input.dtype}."
         if meta is None:
             from msamp.common.tensor import ScalingMeta
             meta = ScalingMeta(otype)
