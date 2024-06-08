@@ -699,6 +699,57 @@ meta.dtype is {meta_dtype} (meta.qtype is {meta.qtype}).'
         return f'ScalingTensor({self.float()}, meta={self.meta}'
 
 
+class _MantainCustomAttributeFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, method_name, original_method, input, args, kwargs):
+        ctx.method_name = method_name
+        ctx.args = args
+        ctx.kwargs = kwargs
+        ctx.original_method = original_method
+        
+        # original_method = getattr(input.__class__, f'__original_{method_name}')      # endless recursion error
+        result = original_method(input, *args, **kwargs)
+        
+        if isinstance(result, torch.Tensor):
+            _MantainCustomAttributeFunction._copy_custom_attributes(input, result)
+        elif isinstance(result, tuple):
+            result = tuple(_MantainCustomAttributeFunction._copy_custom_attributes(input, r) or r for r in result)
+            
+        ctx.save_for_backward(input)
+        
+        return result
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        # original_method = getattr(grad_output.__class__, f'__original_{method_name}')     # endless recursion error
+        
+        input, = ctx.saved_tensors  
+        original_method = ctx.original_method  
+  
+        with torch.enable_grad():  
+            result = original_method(input, *ctx.args, **ctx.kwargs) 
+        
+        if isinstance(result, torch.Tensor):
+            _MantainCustomAttributeFunction._copy_custom_attributes(input, result)
+        elif isinstance(result, tuple):
+            result = tuple(_MantainCustomAttributeFunction._copy_custom_attributes(input, r) or r for r in result)
+            
+        grad_inputs = torch.autograd.grad(result, input, grad_outputs)  
+        
+        grad_input = grad_inputs[0]
+        _MantainCustomAttributeFunction._copy_custom_attributes(input, grad_input)
+  
+        # grad_result = (None, None, grad_inputs[0]) + (None,) * len(ctx.args) + (None,) * len(ctx.kwargs)  
+        return (None, None, grad_input, None, None)
+
+    @staticmethod
+    def _copy_custom_attributes(src, dest):
+        if hasattr(src, '_is_fp8_form'):
+            dest._is_fp8_form = src._is_fp8_form
+        if hasattr(src, '_scaling_meta'):
+            dest._scaling_meta = src._scaling_meta
+            
+            
 class TorchOverider:
     """Class to override torch attributes and functions."""
     one_scales = dict()
@@ -722,7 +773,7 @@ class TorchOverider:
         torch.Tensor.scaling_meta = property(cls._get_scaling_meta, cls._set_scaling_meta)
         
         # Patch methods to retain custom attributes  
-        methods_to_patch = ['reshape', 'permute', 'view', 'clone', 'detach', 'transpose', 'contiguous', 'unbind']  
+        methods_to_patch = ['reshape', 'permute', 'view', 'clone', 'transpose', 'contiguous', 'unbind']  
         for method_name in methods_to_patch:  
             original_method = getattr(torch.Tensor, method_name)  
             patched_method = cls._create_patched_method(method_name, original_method)  
@@ -754,27 +805,21 @@ class TorchOverider:
         assert isinstance(value, ScalingMeta), 'scaling_meta must be a ScalingMeta object.'
         self._scaling_meta = value
         
-    @staticmethod  
-    def _copy_custom_attributes(src, dest):  
-        if hasattr(src, '_is_fp8_form'):  
-            dest._is_fp8_form = src._is_fp8_form  
-        if hasattr(src, '_scaling_meta'):  
-            dest._scaling_meta = src._scaling_meta  
-  
     @classmethod  
     def _create_patched_method(cls, method_name, original_method):  
         def patched_method(self, *args, **kwargs):  
-            result = original_method(self, *args, **kwargs)  
-            if method_name == 'unbind':  
-                # For unbind, result is a tuple of tensors  
-                result = tuple(  
-                    cls._copy_custom_attributes(self, r) or r  
-                    for r in result  
-                )  
-            elif isinstance(result, torch.Tensor):  
-                # For other methods, result is a single tensor  
-                cls._copy_custom_attributes(self, result)  
-            return result
+            # result = original_method(self, *args, **kwargs)  
+            # if method_name == 'unbind':  
+            #     # For unbind, result is a tuple of tensors  
+            #     result = tuple(  
+            #         cls._copy_custom_attributes(self, r) or r  
+            #         for r in result  
+            #     )  
+            # elif isinstance(result, torch.Tensor):  
+            #     # For other methods, result is a single tensor  
+            #     cls._copy_custom_attributes(self, result)  
+            # return result
+            return _MantainCustomAttributeFunction.apply(method_name, original_method, self, args, kwargs)
         return patched_method
 
     @classmethod
