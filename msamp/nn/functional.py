@@ -27,11 +27,7 @@ class _FP8GemmFunction(torch.autograd.Function):
             dtype_holder (torch.Tensor): A tensor to hold the output dtype. The required_grad of this tensor
                 should be if input.required_grad is False.
             enabling_fp8_activation (bool): Whether to enable fp8 activation.
-        """
-        ctx.inp_shape = input.shape
-        if len(ctx.inp_shape) != 2:     # deal with input shape other than [batch, feature]
-            input = input.reshape(-1, ctx.inp_shape[-1])    # to 2D
-                
+        """        
         if isinstance(weight, torch.Tensor) and hasattr(weight, '_meta'):
             padded = weight._padded
             original_shape = weight._original_shape
@@ -48,19 +44,24 @@ class _FP8GemmFunction(torch.autograd.Function):
         model_state.check_metas_in_flat(metas)
         
         requires_grad = input.requires_grad     # to avoid the cast() or view() operation to change the requires_grad attribute of input tensor
+        input_custom_is_fp8_form = input.is_fp8_form   # to avoid .reshape() operation to change the is_fp8_form attribute of input tensor
+        input_custom_scaling_meta = input.scaling_meta  # to avoid .reshape() operation to destroy the scaling_meta attribute of input tensor
+        
+        ctx.inp_shape = input.shape
+        if len(ctx.inp_shape) != 2:     # deal with input shape other than [batch, feature]
+            input = input.reshape(-1, ctx.inp_shape[-1])    # to 2D
         
         if not enabling_fp8_activation:     # normal forward
             input_meta = metas['input']
             input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta)
         else:
-            if not input.is_fp8_form:       # fp16 activation with meta input
+            if not input_custom_is_fp8_form:       # fp16 activation with meta input
                 input_meta = metas['input']
                 input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta)
             else:                           # fp8 activation with meta input. #! we assume that in this time input is a fp16 tensor viewed from a uint8 tensor
-                input_meta = input.scaling_meta
                 input = input.view(dtype=torch.uint8)       # fp16 value -> view to uint8 value
-                input_fp8 = ScalingTensor(input, meta=input_meta)
-
+                input_fp8 = ScalingTensor(input, meta=input_custom_scaling_meta)
+        
         weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
 
         ctx.input_fp8 = input_fp8
