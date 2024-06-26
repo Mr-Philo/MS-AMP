@@ -56,19 +56,27 @@ class _FP16toFP8CastFunction(torch.autograd.Function):
     '''Cast function for FP16 input and FP8 output.'''
     @staticmethod
     def forward(ctx, inp: torch.Tensor) -> torch.Tensor:
-        '''FP16 activation to FP8 activation (in FP16 form)
+        '''FP16 activation to FP8 activation (in FP16/32 form)
         
-        shape: (B, L, D) -> (B, L, D/2)
+        shape: (B, L, D) -> (B, L, D/k)
+        k = {torch.float16: 2, torch.float32: 4}
         '''
         return TypeCast.cast_to_fp8_activation(inp, Dtypes.kfloat8_e4m3)
     
     @staticmethod
     def backward(ctx, grad_output):
-        '''FP8 gradient (in FP16 form) to FP16 gradient
+        '''FP8 gradient (in FP16/32 form) to FP16/32 gradient
         
-        shape: (B, L, D/2) -> (B, L, D)
+        shape: (B, L, D/k) -> (B, L, D)
+        k = {torch.float16: 2, torch.float32: 4}
         '''
-        print("hahaha!")      #! temp
+        # print("hahaha!  in  activation function")      #! temp
+        # print(f"---------WARNING: in Activation Function _FP16toFP8Cast Func---------")
+        # assert grad_output.is_fp8_form
+        # grad_out_fp = TypeCast.cast_from_fp8_activation(grad_output)
+        # print(f"observing ograd: max: {grad_out_fp[~torch.isnan(grad_out_fp)].max()}, min: {grad_out_fp[~torch.isnan(grad_out_fp)].min()}")
+        # print(f"zero element count: {(grad_out_fp == 0).sum()}, NaN count: {torch.isnan(grad_out_fp).sum()}, total element count: {grad_out_fp.numel()}")
+        # print(f"-------------------------------------------")
         return TypeCast.cast_from_fp8_activation(grad_output)
 
 
@@ -76,18 +84,28 @@ class _FP8toFP16CastFunction(torch.autograd.Function):
     '''Cast function for FP8 input and FP16 output.'''
     @staticmethod
     def forward(ctx, inp: torch.Tensor) -> torch.Tensor:
-        '''FP8 activation (in FP16 form) to FP16 activation
+        '''FP8 activation (in FP16/32 form) to FP16/32 activation
         
-        shape: (B, L, D) -> (B, L, 2*D)
+        shape: (B, L, D) -> (B, L, k*D)
+        k = {torch.float16: 2, torch.float32: 4}
         '''
         return TypeCast.cast_from_fp8_activation(inp)
     
     @staticmethod
     def backward(ctx, grad_output):
-        '''FP16 gradient to FP8 gradient (in FP16 form)
+        '''FP16 gradient to FP8 gradient (in FP16/32 form)
         
-        shape: (B, L, 2*D) -> (B, L, D)
+        shape: (B, L, k*D) -> (B, L, D)
+        k = {torch.float16: 2, torch.float32: 4}
         '''
+        # print(f"---------WARNING: in Activation Function _FP8toFP16Cast Func---------")
+        # print(f"observing ograd: max: {grad_output[~torch.isnan(grad_output)].max()}, min: {grad_output[~torch.isnan(grad_output)].min()}")
+        # print(f"zero element count: {(grad_output == 0).sum()}, NaN count: {torch.isnan(grad_output).sum()}, total element count: {grad_output.numel()}")
+        # quanted = TypeCast.cast_to_fp8_activation(grad_output, Dtypes.kfloat8_e5m2)
+        # quanted_fp = TypeCast.cast_from_fp8_activation(quanted)
+        # print(f"observing quanted: max: {quanted_fp[~torch.isnan(quanted_fp)].max()}, min: {quanted_fp[~torch.isnan(quanted_fp)].min()}")
+        # print(f"zero element count: {(quanted_fp == 0).sum()}, NaN count: {torch.isnan(quanted_fp).sum()}, total element count: {quanted_fp.numel()}")
+        # print(f"-------------------------------------------")
         return TypeCast.cast_to_fp8_activation(grad_output, Dtypes.kfloat8_e5m2)
     
         

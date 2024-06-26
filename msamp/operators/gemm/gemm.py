@@ -120,7 +120,8 @@ class Gemm:
         # for FP8 output
         if Dtypes.is_fp8_qtype(out_qtype):
             out_meta = ScalingMeta(out_qtype)
-            out_scale = out_meta.scale
+            out_scale = out_meta.scale      # todo: this 'scale' should be pre-computed, rather than computed by TE gemm
+            # out_scale = max(a_meta.scale, b_meta.scale)
             out_amax = out_meta.amax
         else:
             out_scale = cls._empty_tensor

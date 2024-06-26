@@ -47,6 +47,8 @@ class _FP8GemmFunction(torch.autograd.Function):
         input_custom_is_fp8_form = input.is_fp8_form   # to avoid .reshape() operation to change the is_fp8_form attribute of input tensor
         input_custom_scaling_meta = input.scaling_meta  # to avoid .reshape() operation to destroy the scaling_meta attribute of input tensor
         
+        ctx.input_dtype = input.dtype
+        
         ctx.inp_shape = input.shape
         if len(ctx.inp_shape) != 2:     # deal with input shape other than [batch, feature]
             input = input.reshape(-1, ctx.inp_shape[-1])    # to 2D
@@ -71,20 +73,18 @@ class _FP8GemmFunction(torch.autograd.Function):
 
         ctx.enabling_fp8_activation = enabling_fp8_activation
         
-        if not enabling_fp8_activation:
-            output_dtype = dtype_holder.dtype
-            output_qtype = Dtypes.dtype_to_qtype[output_dtype]
-            
-            ctx.output_dtype = output_dtype
-            ctx.output_qtype = output_qtype
-            
+        output_dtype = dtype_holder.dtype
+        output_qtype = Dtypes.dtype_to_qtype[output_dtype]
+        
+        ctx.output_dtype = output_dtype
+        ctx.output_qtype = output_qtype
+        
+        if not enabling_fp8_activation:    
             out = Gemm.fp8_gemm(weight_fp8, input_fp8, output_qtype, use_split_accumulator=False)       # return torch.Tensor
             if bias is not None:
                 out = out + bias.type(output_dtype).view(1, -1)
         else:
             output_qtype = Dtypes.kfloat8_e4m3
-            ctx.output_dtype = torch.float16
-            ctx.output_qtype = output_qtype
 
             bias = bias.to(torch.float16) if ((bias is not None) and bias.dtype == torch.float32) else bias
             out = Gemm.fp8_gemm(weight_fp8, input_fp8, output_qtype, bias, use_split_accumulator=False)        # return ScalingTensor
@@ -99,9 +99,12 @@ class _FP8GemmFunction(torch.autograd.Function):
         ctx.true_out_shape = out.shape
         
         if ctx.enabling_fp8_activation:
+            if not isinstance(out, ScalingTensor):
+                out = out.cast(Dtypes.kfloat8_e4m3, meta=metas['output'])
             # out = TypeCast.cast_to_fp8_activation(out, Dtypes.kfloat8_e4m3, meta=metas['output'])
             out_meta = out.meta
-            out = out.value.view(dtype=torch.float16)
+            # out = out.value.view(dtype=torch.float16)
+            out = out.value.view(dtype=ctx.output_dtype)
             out.scaling_meta = out_meta
             out.is_fp8_form = True
             return out
@@ -127,9 +130,10 @@ class _FP8GemmFunction(torch.autograd.Function):
         
         # some pre-assertion-checks
         if ctx.enabling_fp8_activation:
+            last_dim_scale_factor = 2 if ctx.output_dtype == torch.float16 else 4
             assert (output_grad.is_fp8_form and output_grad.scaling_meta is not None), f"output_grad should be a fp8 tensor with scaling_meta, but got outgrad is_fp8_form={output_grad.is_fp8_form} with scaling_meta {output_grad.scaling_meta}"
-            assert output_grad.shape[-1]*2 == ctx.true_out_shape[-1]        # view back,见下面分析
-            assert output_grad.shape == ctx.true_out_shape[:-1] + (int(ctx.true_out_shape[-1]/2), ), f"activation grad shape should be the same as activation shape {ctx.true_out_shape} (under FP8 activation, the last dimension halfed to {ctx.true_out_shape[:-1] + (ctx.true_out_shape[-1]/2, )}, but got {output_grad.shape}"
+            assert output_grad.shape[-1]*last_dim_scale_factor == ctx.true_out_shape[-1]        # view back,见下面分析
+            assert output_grad.shape == ctx.true_out_shape[:-1] + (int(ctx.true_out_shape[-1]/last_dim_scale_factor), ), f"activation grad shape should be the same as activation shape {ctx.true_out_shape} (under FP8 activation, the last dimension halfed to {ctx.true_out_shape[:-1] + (ctx.true_out_shape[-1]/last_dim_scale_factor, )}, but got {output_grad.shape}"
         else:
             assert output_grad.shape == ctx.true_out_shape, f"activation grad shape should be the same as activation shape {ctx.true_out_shape} , but got {output_grad.shape}"
             
@@ -137,8 +141,8 @@ class _FP8GemmFunction(torch.autograd.Function):
         output_grad_meta = output_grad.scaling_meta     # step1: get meta, see torch.tensor.overrider. avoid the view() operation to destroy the scaling_meta
         if len(ctx.true_out_shape) != 2:
             if ctx.enabling_fp8_activation:
-                output_grad = output_grad.view(-1, int(ctx.true_out_shape[-1]/2))    # to 2D
-                assert output_grad.shape == ctx.gemm_out_shape[:-1] + (int(ctx.gemm_out_shape[-1]/2), ), f"activation grad shape for gemm computing should be the same as gemm_activation shape {ctx.gemm_out_shape} (under FP8 activation, the last dimension halfed to {ctx.gemm_out_shape[:-1] + (ctx.gemm_out_shape[-1]/2, )}, but got {output_grad.shape}"
+                output_grad = output_grad.view(-1, int(ctx.true_out_shape[-1]/last_dim_scale_factor))    # to 2D
+                assert output_grad.shape == ctx.gemm_out_shape[:-1] + (int(ctx.gemm_out_shape[-1]/last_dim_scale_factor), ), f"activation grad shape for gemm computing should be the same as gemm_activation shape {ctx.gemm_out_shape} (under FP8 activation, the last dimension halfed to {ctx.gemm_out_shape[:-1] + (ctx.gemm_out_shape[-1]/last_dim_scale_factor, )}, but got {output_grad.shape}"
             else:
                 output_grad = output_grad.view(-1, ctx.true_out_shape[-1])       # to 2D
                 assert output_grad.shape == ctx.gemm_out_shape, f"activation grad shape for gemm computing should be the same as gemm_activation shape {ctx.gemm_out_shape}, but got {output_grad.shape}"
@@ -162,13 +166,15 @@ class _FP8GemmFunction(torch.autograd.Function):
             weight_fp8_t = ctx.weight_fp8.fp8_transpose()
             
             output_qtype = Dtypes.kfloat8_e5m2 if Dtypes.is_fp8_qtype(ctx.output_qtype) else ctx.output_qtype
+            # todo:  direct receives FP8 output from fp8_gemm will have accuracy error on activation gradient
+       
             input_grad = Gemm.fp8_gemm(weight_fp8_t, ograd_fp8, output_qtype, use_split_accumulator=True)
             # print(f">>> In _FP8GemmFunction.backward, input_grad for return: {input_grad} (before quant)")    #! temporary
             
             # deal with input shape other than [batch, feature]
             if len(ctx.true_out_shape) != 2:
                 input_grad = input_grad.view(ctx.true_out_shape[:-1] + (-1, ))       # to original n-D
-            
+
             if ctx.enabling_fp8_activation:
                 #! add activation grad quantization
                 # input_grad_scaling_tensor = input_grad.cast(Dtypes.kfloat8_e5m2, meta=metas['agrad'])       # step1: quantize
@@ -176,9 +182,11 @@ class _FP8GemmFunction(torch.autograd.Function):
                 # input_grad = input_grad.view(dtype=torch.float16)                            # step3: uint8 view to fp16: #!shape[-1] reduced by half
                 # input_grad.scaling_meta = input_grad_scaling_tensor.meta                     # step4: set scaling meta, see torch.tensor.overrider
                 # input_grad.is_fp8_form = True                                                # step5: set flag
-                
+                if not isinstance(input_grad, ScalingTensor):
+                    input_grad = input_grad.cast(Dtypes.kfloat8_e5m2, meta=metas['agrad'])      # todo: if need 'sync=True'?
                 input_grad_meta = input_grad.meta
-                input_grad = input_grad.value.view(dtype=torch.float16)
+                # input_grad = input_grad.value.view(dtype=torch.float16)
+                input_grad = input_grad.value.view(dtype=ctx.input_dtype)   #! this is important
                 input_grad.scaling_meta = input_grad_meta
                 input_grad.is_fp8_form = True
         else:
@@ -201,7 +209,6 @@ class _FP8GemmFunction(torch.autograd.Function):
                 # gradient accumulation, old_wgrad is FP32 or FP16 without tensor scaling.
                 # currently cublas_gemm with accumulation mode is not supported with FP8 GEMM output
                 old_wgrad = ctx.weight.grad.to(ctx.output_dtype)
-                wgrad_qtype = Dtypes.kfloat16 if Dtypes.is_fp8_qtype(ctx.output_qtype) else ctx.output_qtype
                 wgrad = Gemm.fp8_gemm(
                     input_fp8_t,
                     ograd_fp8_t,

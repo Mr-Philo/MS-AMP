@@ -167,7 +167,7 @@ class LinearTestCase(unittest.TestCase):
     def test_activation_fp8(self):
         """Test FP8 activation in FP8Linear."""
         input = torch.randn((4, 4), device='cuda')
-        linear = torch.nn.Linear(4, 8, bias=False).cuda()
+        linear = torch.nn.Linear(4, 8, bias=True).cuda()
         
         # for standard comparison
         model1 = copy.deepcopy(linear)
@@ -198,9 +198,9 @@ class LinearTestCase(unittest.TestCase):
         """Test FP8 activation in multi-layer FP8Linear."""
         input = torch.randn((4, 4), device='cuda')
         model = torch.nn.Sequential(
-            torch.nn.Linear(4, 8, bias=False).cuda(),
-            torch.nn.Linear(8, 8, bias=False).cuda(),
-            torch.nn.Linear(8, 4, bias=False).cuda()
+            torch.nn.Linear(4, 8, bias=True).cuda(),
+            torch.nn.Linear(8, 8, bias=True).cuda(),
+            torch.nn.Linear(8, 4, bias=True).cuda()
         )
         
         model1 = copy.deepcopy(model)
@@ -229,8 +229,8 @@ class LinearTestCase(unittest.TestCase):
     @decorator.cuda_test
     def test_activation_fp8_backward(self):
         """Test backward of FP8 activation in FP8Linear."""
-        input = torch.randn((3, 4), device='cuda')
-        linear = torch.nn.Linear(4, 8, bias=False).cuda()
+        input = torch.randn((3, 3, 4), device='cuda')
+        linear = torch.nn.Linear(4, 8, bias=True).cuda()
         
         # for standard comparison
         model1 = copy.deepcopy(linear)
@@ -267,11 +267,11 @@ class LinearTestCase(unittest.TestCase):
     @decorator.cuda_test
     def test_activation_fp8_backward_multilayer(self):
         """Test backward of FP8 activation in multi-layer FP8Linear."""
-        input = torch.randn((3, 4), device='cuda')
+        input = torch.randn((3, 3, 4), device='cuda')
         model = torch.nn.Sequential(
-            torch.nn.Linear(4, 8, bias=False).cuda(),
-            torch.nn.Linear(8, 8, bias=False).cuda(),
-            torch.nn.Linear(8, 4, bias=False).cuda()
+            torch.nn.Linear(4, 8, bias=True).cuda(),
+            torch.nn.Linear(8, 8, bias=True).cuda(),
+            torch.nn.Linear(8, 4, bias=True).cuda()
         )
         
         model1 = copy.deepcopy(model)

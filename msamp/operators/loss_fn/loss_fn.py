@@ -5,9 +5,7 @@
 
 import torch
 
-from msamp.common.dtype import Dtypes, QType
-from msamp.common.utils import Device
-from msamp.common.tensor import ScalingMeta
+from msamp.common.dtype import Dtypes
 from msamp.common.tensor import TypeCast
 
 
@@ -16,10 +14,10 @@ class _ScalingSum(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inp, dtype=None):
         
-        dtype = torch.float16 if dtype is None else dtype
+        ctx.dtype = inp.dtype if dtype is None else dtype
         
-        ctx.shape = inp.shape             # for example, torch.Size([3,2])
-        ctx.true_out_shape = inp.shape[:-1] + (inp.shape[-1]*2, ) 
+        ctx.shape = inp.shape
+        ctx.true_out_shape = inp.shape[:-1] + (inp.shape[-1]*2 if ctx.dtype == torch.float16 else inp.shape[-1]*4, )    # select between torch.float16 and torch.float32 
 
         inp = TypeCast.cast_from_fp8_activation(inp)
         
@@ -27,7 +25,7 @@ class _ScalingSum(torch.autograd.Function):
     
     @staticmethod
     def backward(ctx, grad_output):
-        grad = grad_output * torch.ones(ctx.true_out_shape, dtype=torch.float16).cuda()  # for example, torch.Size([3,4])
+        grad = grad_output * torch.ones(ctx.true_out_shape, dtype=ctx.dtype).cuda()
         
         return TypeCast.cast_to_fp8_activation(grad, Dtypes.kfloat8_e5m2), None
 
@@ -38,7 +36,8 @@ class _ScalingNLLLoss(torch.autograd.Function):
     @staticmethod  
     def forward(ctx, inp, target):  
         ctx.shape = inp.shape  
-        ctx.true_out_shape = inp.shape[:-1] + (inp.shape[-1]*2, )       # same as inp.view(dtype=torch.uint8).shape
+        ctx.dtype = inp.dtype
+        ctx.true_out_shape = inp.shape[:-1] + (inp.shape[-1]*2 if ctx.dtype == torch.float16 else inp.shape[-1]*4, )       # same as inp.view(dtype=torch.uint8).shape
         inp = TypeCast.cast_from_fp8_activation(inp)
         ctx.save_for_backward(inp, target)  
 
@@ -50,7 +49,7 @@ class _ScalingNLLLoss(torch.autograd.Function):
           
         # Compute the gradient of the loss w.r.t the input  
         N = inp.size(0)
-        grad_input = torch.zeros(ctx.true_out_shape, dtype=torch.float16).cuda()
+        grad_input = torch.zeros(ctx.true_out_shape, dtype=ctx.dtype).cuda()
         # Calculate the gradient of the loss with respect to input
         grad_input.scatter_(1, target.unsqueeze(1), -1.0 / N)
         # Scale by the incoming gradient (chain rule)
@@ -72,7 +71,7 @@ class Loss_fn:
             torch.Tensor: Output tensor.
         """
         if inp.is_fp8_form:
-            assert inp.dtype == torch.float16, f"Currently _ScalingSum function only supports float16 input tensor when it is in fp8 form, but got {inp.dtype}"
+            assert inp.dtype in [torch.float16, torch.float32], f"Currently _ScalingSum function only supports float16 or float32 input tensor when it is in fp8 form, but got {inp.dtype}"
             return _ScalingSum.apply(inp, dtype)
         else:
             return torch.sum(inp, dtype)
@@ -89,7 +88,7 @@ class Loss_fn:
             torch.Tensor: Output tensor.  
         """  
         if inp.is_fp8_form:  
-            assert inp.dtype == torch.float16, f"Currently _ScalingNLLLoss function only supports float16 input tensor when it is in fp8 form, but got {inp.dtype}"  
+            assert inp.dtype in [torch.float16, torch.float32], f"Currently _ScalingNLLLoss function only supports float16 or float32 input tensor when it is in fp8 form, but got {inp.dtype}" 
             return _ScalingNLLLoss.apply(inp, target)  
         else:  
             return torch.nn.functional.nll_loss(inp, target)
