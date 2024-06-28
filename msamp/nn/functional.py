@@ -66,9 +66,10 @@ class _FP8GemmFunction(torch.autograd.Function):
         
         weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
 
-        ctx.input_fp8 = input_fp8
-        ctx.input_fp8.requires_grad = requires_grad
-        ctx.weight_fp8 = weight_fp8
+        ctx.input_fp8_sf = input_fp8.meta
+        ctx.weight_fp8_sf = weight_fp8.meta
+        ctx.save_for_backward(input_fp8.value.view(dtype=torch.float16), weight_fp8.value.view(dtype=torch.float16))
+        ctx.input_fp8_requires_grad = requires_grad
         ctx.weight = weight
 
         ctx.enabling_fp8_activation = enabling_fp8_activation
@@ -162,8 +163,12 @@ class _FP8GemmFunction(torch.autograd.Function):
         else:
             ograd_fp8, ograd_fp8_t = output_grad.fused_cast_transpose(Dtypes.kfloat8_e5m2, meta=ograd_meta)     # fp16 -> fp8 (quantized)
 
-        if ctx.input_fp8.requires_grad:
-            weight_fp8_t = ctx.weight_fp8.fp8_transpose()
+        input_fp8_fp16, weight_fp8_fp16 = ctx.saved_tensors
+        input_fp8 = ScalingTensor(input_fp8_fp16.view(dtype=torch.uint8), meta=ctx.input_fp8_sf)
+        weight_fp8 = ScalingTensor(weight_fp8_fp16.view(dtype=torch.uint8), meta=ctx.weight_fp8_sf)
+        
+        if ctx.input_fp8_requires_grad:
+            weight_fp8_t = weight_fp8.fp8_transpose()
             
             output_qtype = Dtypes.kfloat8_e5m2 if Dtypes.is_fp8_qtype(ctx.output_qtype) else ctx.output_qtype
             # todo:  direct receives FP8 output from fp8_gemm will have accuracy error on activation gradient
@@ -195,7 +200,7 @@ class _FP8GemmFunction(torch.autograd.Function):
         # print(f">>> In _FP8GemmFunction.backward, input_grad for return: {input_grad} (after quant), with scaling_meta {input_grad.scaling_meta if input_grad is not None else None}")    #! temporary
         
         if ctx.weight.requires_grad:
-            input_fp8_t = ctx.input_fp8.fp8_transpose()
+            input_fp8_t = input_fp8.fp8_transpose()
             wgrad_qtype = ctx.output_qtype
             # compute weight gradient
             if ctx.weight.grad is None:
