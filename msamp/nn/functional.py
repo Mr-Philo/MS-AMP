@@ -71,6 +71,8 @@ class _FP8GemmFunction(torch.autograd.Function):
         ctx.save_for_backward(input_fp8.value.view(dtype=torch.float16), weight_fp8.value.view(dtype=torch.float16))
         ctx.input_fp8_requires_grad = requires_grad
         ctx.weight = weight
+        
+        ctx.bias_requires_grad = bias.requires_grad if bias is not None else False
 
         ctx.enabling_fp8_activation = enabling_fp8_activation
         
@@ -167,6 +169,8 @@ class _FP8GemmFunction(torch.autograd.Function):
         input_fp8 = ScalingTensor(input_fp8_fp16.view(dtype=torch.uint8), meta=ctx.input_fp8_sf)
         weight_fp8 = ScalingTensor(weight_fp8_fp16.view(dtype=torch.uint8), meta=ctx.weight_fp8_sf)
         
+        bias_grad = ograd_fp8.float().sum(0) if ctx.bias_requires_grad else None
+            
         if ctx.input_fp8_requires_grad:
             weight_fp8_t = weight_fp8.fp8_transpose()
             
@@ -228,7 +232,7 @@ class _FP8GemmFunction(torch.autograd.Function):
                     wgrad = wgrad.cast(Dtypes.kfloat8_e4m3, meta=wgrad_meta, sync=True)
                 wgrad = wgrad.value.view(-1).view(dtype=torch.float32)
                 wgrad.meta = wgrad_meta
-                return input_grad, wgrad, None, None, None, None
+                return input_grad, wgrad, None, None, bias_grad, None
             elif model_state.use_fp8_ddp:
                 # todo: how to deal with this case when wgrad is a ScalingTensor
                 wgrad.meta = wgrad_meta
@@ -240,7 +244,7 @@ class _FP8GemmFunction(torch.autograd.Function):
             ctx.weight.backward_grad_update(wgrad)
 
         # print(f">>> In _FP8GemmFunction.backward, input_grad for return: {input_grad} (before return)")    #! temporary
-        return input_grad, None, None, None, None, None
+        return input_grad, None, None, None, bias_grad, None
 
 
 class FunctionalOverider:
