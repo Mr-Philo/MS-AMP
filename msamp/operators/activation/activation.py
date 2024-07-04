@@ -215,10 +215,11 @@ class _ReluFunction(torch.autograd.Function):
         
         assert inp.is_fp8_form, "This _ReluFunction should only be called with FP8 input. Please check if the input tensor is in FP8 form."
         meta = inp.scaling_meta
+        ctx.dtype = inp.dtype
         inp = inp.view(dtype=torch.int8)
         ctx.save_for_backward(inp)
         
-        inp = inp.clamp(min=0).view(dtype=torch.float16)
+        inp = inp.clamp(min=0).view(dtype=ctx.dtype)
         inp.scaling_meta = meta
         inp.is_fp8_form = True
 
@@ -232,7 +233,7 @@ class _ReluFunction(torch.autograd.Function):
         grad_input = grad_output.view(dtype=torch.int8)
         inp, = ctx.saved_tensors
         grad_input[inp <= 0] = 0
-        grad_input = grad_input.view(dtype=torch.float16)
+        grad_input = grad_input.view(dtype=ctx.dtype)
         grad_input.scaling_meta = meta
         grad_input.is_fp8_form = True
                 
@@ -246,6 +247,7 @@ class _DropoutFunction(torch.autograd.Function):
     def forward(ctx, inp: torch.Tensor, p: float, training: bool = True) -> torch.Tensor:  
         assert inp.is_fp8_form, "This _DropoutFunction should only be called with FP8 input. Please check if the input tensor is in FP8 form."  
         meta = inp.scaling_meta
+        ctx.dtype = inp.dtype
         inp = inp.view(dtype=torch.uint8)
           
         if training:  
@@ -258,7 +260,7 @@ class _DropoutFunction(torch.autograd.Function):
         else:  
             out = inp  
         
-        out = out.view(dtype=torch.float16)
+        out = out.view(dtype=ctx.dtype)
         out.scaling_meta = meta
         out.is_fp8_form = True    
         return out
@@ -279,7 +281,7 @@ class _DropoutFunction(torch.autograd.Function):
         # Compute gradient input  
         grad_input = grad_output * mask  
         
-        grad_input = grad_input.view(dtype=torch.float16)
+        grad_input = grad_input.view(dtype=ctx.dtype)
         grad_input.scaling_meta = meta
         grad_input.is_fp8_form = True
         return grad_input, None, None
@@ -324,10 +326,11 @@ class _FlattenFunction(torch.autograd.Function):
     def forward(ctx, inp: torch.Tensor, start_dim: int = 0, end_dim: int = -1) -> torch.Tensor:  
         assert inp.is_fp8_form, "This _FlattenFunction should only be called with FP8 input. Please check if the input tensor is in FP8 form."  
         meta = inp.scaling_meta
+        ctx.dtype = inp.dtype
         inp = inp.view(dtype=torch.uint8)
         ctx.original_shape = inp.shape
           
-        out = torch.flatten(inp, start_dim=start_dim, end_dim=end_dim).view(dtype=torch.float16)
+        out = torch.flatten(inp, start_dim=start_dim, end_dim=end_dim).view(dtype=ctx.dtype)
         out.scaling_meta = meta
         out.is_fp8_form = True
         
@@ -340,7 +343,7 @@ class _FlattenFunction(torch.autograd.Function):
         grad_output = grad_output.view(dtype=torch.uint8)
           
         grad_input = grad_output.view(ctx.original_shape)
-        grad_input = grad_input.view(dtype=torch.float16)
+        grad_input = grad_input.view(dtype=ctx.dtype)
         grad_input.scaling_meta = meta
         grad_input.is_fp8_form = True
           

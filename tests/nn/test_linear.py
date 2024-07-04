@@ -164,6 +164,7 @@ class LinearTestCase(unittest.TestCase):
         self.assertTrue(torch.equal(output1, output2))
         
     @decorator.cuda_test
+    @unittest.skip("temporary testing case for fp8 activation")
     def test_activation_fp8(self):
         """Test FP8 activation in FP8Linear."""
         input = torch.randn((4, 4), device='cuda')
@@ -194,6 +195,7 @@ class LinearTestCase(unittest.TestCase):
         # python -m unittest tests.nn.test_linear.LinearTestCase.test_activation_fp8
         
     @decorator.cuda_test
+    @unittest.skip("temporary testing case for fp8 activation")
     def test_activation_fp8_multilayer(self):
         """Test FP8 activation in multi-layer FP8Linear."""
         input = torch.randn((4, 4), device='cuda')
@@ -227,6 +229,7 @@ class LinearTestCase(unittest.TestCase):
         # python -m unittest tests.nn.test_linear.LinearTestCase.test_activation_fp8_multilayer
     
     @decorator.cuda_test
+    @unittest.skip("temporary testing case for fp8 activation")
     def test_activation_fp8_backward(self):
         """Test backward of FP8 activation in FP8Linear."""
         input = torch.randn((3, 3, 4), device='cuda')
@@ -265,6 +268,7 @@ class LinearTestCase(unittest.TestCase):
         # python -m unittest tests.nn.test_linear.LinearTestCase.test_activation_fp8_backward
         
     @decorator.cuda_test
+    @unittest.skip("temporary testing case for fp8 activation")
     def test_activation_fp8_backward_multilayer(self):
         """Test backward of FP8 activation in multi-layer FP8Linear."""
         input = torch.randn((3, 3, 4), device='cuda')
@@ -299,3 +303,32 @@ class LinearTestCase(unittest.TestCase):
         print(f"fp8 model weight grad: {model2[0].weight.grad}, with dtype: {model2[0].weight.grad.dtype}, with requires_grad: {model2[0].weight.grad._requires_grad}")
         
         # python -m unittest tests.nn.test_linear.LinearTestCase.test_activation_fp8_backward_multilayer
+        
+    @decorator.cuda_test
+    def test_fp8_activation_in_fp8linear(self):
+        """Test FP8 activation in FP8Linear."""
+        input = torch.randn((3, 3, 4), device='cuda')
+        model = torch.nn.Sequential(
+            torch.nn.Linear(4, 8, bias=True).cuda(),
+            torch.nn.Linear(8, 8, bias=True).cuda(),
+            torch.nn.Linear(8, 4, bias=True).cuda()
+        )
+        
+        model1 = copy.deepcopy(model)
+        model1 = LinearReplacer.replace(model1, Dtypes.kfloat16)
+        output1 = model1(input)
+        loss = output1.sum()
+        loss.backward()
+        grad1 = model1[0].weight.grad
+        
+        model2 = copy.deepcopy(model)   
+        model2 = LinearReplacer.replace(model2, Dtypes.kfloat16, enabling_fp8_activation=True)
+        output2 = model2(input)
+        self.assertTrue(output2.is_fp8_form)
+        output2_fp = TypeCast.cast_from_fp8_activation(output2)
+        self.assertTrue(torch.allclose(output1, output2_fp, 0, 0.1))
+        loss = Loss_fn.sum(output2)
+        loss.backward()
+        grad2 = model2[0].weight.grad
+        
+        self.assertTrue(torch.equal(grad1.float(), grad2.float()))
