@@ -89,7 +89,8 @@ class MSAMPDeepSpeedEngine(DeepSpeedEngine):
                 # O3 is for ZeRO and need to cast to O2 for MS-AMP.
                 optlevel = 'O2'
             use_te = self.msamp_use_te()
-            model, basic_optimizer = msamp_initialize(self.module, basic_optimizer, optlevel, use_te)
+            use_fp8_act = self.msamp_use_fp8_act()
+            model, basic_optimizer = msamp_initialize(self.module, basic_optimizer, optlevel, use_te, use_fp8_act)
             self._set_client_model(model)
             # We need to reset param names after msamp initialize.
             self.param_names = {param: name for name, param in model.named_parameters()}
@@ -484,3 +485,7 @@ class MSAMPDeepSpeedEngine(DeepSpeedEngine):
     def msamp_use_te(self):
         """Whether use transformer engine."""
         return self._config.msamp_use_te
+    
+    def msamp_use_fp8_act(self):
+        """Whether use fp8 activation."""
+        return self._config.msamp_use_fp8_act

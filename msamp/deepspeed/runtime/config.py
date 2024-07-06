@@ -14,6 +14,8 @@ MSAMP_OPTLEVEL = 'opt_level'
 MSAMP_OPTLEVEL_DEFAULT = 'O1'
 MSAMP_USE_TE = 'use_te'
 MSAMP_USE_TE_DEFAULT = False
+FP8_ACT = 'fp8_act'
+FP8_ACT_DEFAULT = False
 FP8 = 'fp8'
 
 
@@ -29,6 +31,7 @@ class MSAMPDeepSpeedConfig(DeepSpeedConfig):
         self.msamp_enabled = get_msamp_enabled(param_dict)
         self.msamp_optlevel = get_msamp_optlevel(param_dict)
         self.msamp_use_te = get_msamp_use_te(param_dict)
+        self.msamp_use_fp8_act = get_msamp_fp8_act(param_dict)
 
     def _do_error_check(self):
         """Do error checking on the parameters."""
@@ -84,3 +87,17 @@ def get_msamp_use_te(param_dict):
     if MSAMP in param_dict.keys():
         return get_scalar_param(param_dict[MSAMP], MSAMP_USE_TE, MSAMP_USE_TE_DEFAULT)
     return None
+
+
+def get_msamp_fp8_act(param_dict):
+    '''Get the MS-AMP fp8 activation flag from the parameter dictionary.
+    
+    Args:
+    param_dict (dict): The parameter dictionary.
+    
+    Returns:
+        bool: The MS-AMP fp8 activation flag.
+    '''
+    if MSAMP in param_dict.keys():
+        return get_scalar_param(param_dict[MSAMP], FP8_ACT, FP8_ACT_DEFAULT)
+    return False
