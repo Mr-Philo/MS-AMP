@@ -34,12 +34,16 @@ def test_model_state():
     module1 = ScalingModule()
     module1.scaling_metas = dict(
         input=ScalingMeta(Dtypes.kfloat8_e4m3, window_size=16),
+        output=ScalingMeta(Dtypes.kfloat8_e4m3, window_size=16),
+        agrad=ScalingMeta(Dtypes.kfloat8_e5m2, window_size=1),
         wgrad=ScalingMeta(Dtypes.kfloat8_e4m3, window_size=1),
         ograd=ScalingMeta(Dtypes.kfloat8_e5m2, window_size=16)
     )
     module2 = ScalingModule()
     module2.scaling_metas = dict(
         input=ScalingMeta(Dtypes.kfloat8_e4m3, window_size=16),
+        output=ScalingMeta(Dtypes.kfloat8_e4m3, window_size=16),
+        agrad=ScalingMeta(Dtypes.kfloat8_e5m2, window_size=1),
         wgrad=ScalingMeta(Dtypes.kfloat8_e4m3, window_size=1),
         ograd=ScalingMeta(Dtypes.kfloat8_e5m2, window_size=16)
     )
@@ -48,8 +52,10 @@ def test_model_state():
     model_state.register_scaling_metas(model)
 
     scaling_metas = model_state.flattened_scaling_metas
-    assert len(scaling_metas.keys()) == 3
+    assert len(scaling_metas.keys()) == 5
     assert 'input' in scaling_metas
+    assert 'output' in scaling_metas
+    assert 'agrad' in scaling_metas
     assert 'wgrad' in scaling_metas
     assert 'ograd' in scaling_metas
 
