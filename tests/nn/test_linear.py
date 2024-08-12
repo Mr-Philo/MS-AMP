@@ -39,6 +39,32 @@ class LinearTestCase(unittest.TestCase):
             self.assertTrue(fp8_output.dtype == torch.float32)
             self.assertTrue(fp8_output.size() == torch.Size((4, 8)))
             self.assertTrue(torch.allclose(output, fp8_output, 0, 0.1))
+            
+    @decorator.cuda_test
+    def test_fp8linear_forward_with_simu_fp4_casting(self):
+        """Test FP8Linear forward function with simulated fp4 casting."""
+        input = torch.randn((4, 4), device='cuda')
+        from msamp.common.tensor.tensor import simu_cast_to_fp4
+        input_fp4 = simu_cast_to_fp4(input)
+        model = torch.nn.Sequential(
+            torch.nn.Linear(4, 8).cuda(),
+            torch.nn.Linear(8, 8).cuda(),
+            torch.nn.Linear(8, 4).cuda()
+        )
+        
+        print(f"out: {model(input)}")
+        print(f"out_fp4: {model(input_fp4)}")
+        
+        linear = torch.nn.Linear(4, 8).cuda()
+        for qtype in [Dtypes.kfloat32, Dtypes.kfloat16, Dtypes.kbfloat16]:
+            model = LinearReplacer.replace(linear, qtype)
+
+            fp8_output = model(input)
+            fp4_output = model(input_fp4)
+            self.assertTrue(fp4_output.size() == torch.Size((4, 8)))
+            self.assertTrue(torch.allclose(fp8_output, fp4_output, 0, 0.1), f"fp8_output: {fp8_output}, fp4_output: {fp4_output}, weight qtype: {qtype}")
+        
+    # python -m unittest tests.nn.test_linear.LinearTestCase.test_fp8linear_forward_with_simu_fp4_casting
 
     @decorator.cuda_test
     def test_fp8linear_backward(self):

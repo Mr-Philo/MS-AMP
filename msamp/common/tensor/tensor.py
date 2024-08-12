@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from msamp.common.tensor import ScalingMeta
 from msamp.common.tensor import HookManager
-from msamp.common.dtype import Dtypes
+from msamp.common.dtype import Dtypes, Floating
 from msamp.common.tensor import TypeCast
 from msamp.common.utils import TransformerEngineWrapper
 
@@ -915,3 +915,159 @@ class TorchOverider:
 
 
 TorchOverider.override()
+
+
+@staticmethod
+def simu_cast_to_fp4_using_scaling_meta(input: torch.Tensor):
+    """Simulated casting pytorch tensor to fp4. Note: 
+
+    Args:
+        input (torch.Tensor): Input tensor to cast.
+
+    Return:
+        torch.Tensor: whose dtype is still torch.float16 or torch.float32, but numerically quantized into fp4.
+    """
+    assert isinstance(input, torch.Tensor), f"Input tensor should be torch.Tensor, but got {type(input)}."
+    
+    M = 1
+    E = 2
+    maxval = Floating._get_fp_max(E, M, inf_existed=False)
+    bias = 2**E - torch.log2(torch.tensor(maxval)) + torch.log2(torch.tensor(2 - 2 ** (-M))) - 1
+    print(f"maxval: {maxval}, bias: {bias}")
+    
+    meta = ScalingMeta(Dtypes.kfloat4)
+    print(f"meta: {meta}")
+    meta.amax[0] = input.abs().max()
+    meta.reset_scaling_factor()
+    meta.scale_inv.data.copy_(torch.reciprocal(meta.scale))
+    print(f"meta after reset: {meta}")
+    
+    result = input.view(1, -1) * meta.scale      # view maybe not needed
+    result = torch.round(result)
+    result = result.view_as(input)
+    # result = result.to(torch.uint4)       # currently not supported
+    print(f"result(in torch.uint): {result}")
+    # from msamp.common.tensor import ScalingTensor
+    # result = ScalingTensor
+    
+    # log_scales = torch.clamp((torch.floor(torch.log2(torch.abs(input)) + bias)).detach(), 1.0)
+    # scales = 2.0 ** (log_scales - M - bias)
+    # print(f"log_scales: {log_scales}, scales: {scales}")
+    # result = torch.round(input / scales) * scales
+    
+    return result, meta
+    
+
+def simu_cast_to_fp4(input: torch.Tensor, format: str = 'e1m2', debug_info: bool = False, nan_existed: bool = True):
+    """Simulated casting pytorch tensor to fp4. Note: 
+
+    Args:
+        input (torch.Tensor): Input tensor to cast.
+        format (str): format of fp4, should be 'e1m2' or 'e2m1'.
+        debug_info (bool): whether to print debug info.
+
+    Return:
+        torch.Tensor: whose dtype is still torch.float16 or torch.float32, but numerically quantized into fp4.
+    """
+    assert isinstance(input, torch.Tensor), f"Input tensor should be torch.Tensor, but got {type(input)}."
+    assert format in ['e1m2', 'e2m1'], f"Unsupported format: {format}. Please choose from ['e1m2', 'e2m1']."
+    
+    if format == 'e1m2':
+        E = 1
+        M = 2
+    else:
+        E = 2
+        M = 1
+
+    amax = input.abs().max()
+    scale = torch.ones((), device='cuda')
+    fp_max = Floating._get_fp_max(E, M, inf_existed=False, nan_existed=nan_existed)
+
+    margin = 0
+    print(f"amax: {amax}, scale: {scale}, fp_max: {fp_max}, margin: {margin}") if debug_info else None
+    sf = ScalingMeta.compute_scaling_factor(amax, scale, fp_max, margin)
+    print(f"computed scaling factor: {sf}") if debug_info else None
+    
+    sf = sf * 2     #! Manually add for fp4. This is to adapt to the quantization grid of fp4 (0.5) since the precision of fp4 is too low.
+    result = input.view(1, -1) * sf      # view maybe not needed
+    print(f"casted result: {result.view_as(input)}") if debug_info else None
+    result = torch.round(result)
+    result = result.view_as(input)
+    # result = result.to(torch.uint4)       # currently not supported
+    print(f"result(in torch.uint-like style): {result}") if debug_info else None
+
+    result = result / sf
+    return result
+
+@staticmethod
+def simu_cast_to_fp4_scalingtensor(input):
+    """Simulated casting pytorch tensor to fp4. Note: 
+
+    Args:
+        input (SclingTensor): Input tensor to cast whose type shoule be ScalingTensor.
+
+    Return:
+        ScalingTensor: whose qtype is still fp8 but numerically quantized into fp4.
+    """
+    
+    from msamp.common.tensor import ScalingTensor
+    assert isinstance(input, ScalingTensor), f"Input tensor should be ScalingTensor, but got {type(input)}."
+    return input
+
+import numpy as np
+from itertools import product
+
+def decode_binary_str(F_str):
+    F = sum([2 ** -(i + 1) * int(a) for i, a in enumerate(F_str)]) * 2 ** len(F_str)
+    return F
+
+def generate_all_values_fp(
+    num_total_bits: int = 8, num_exponent_bits: int = 4, bias: int = 8
+) -> list:
+    num_fraction_bits = num_total_bits - 1 - num_exponent_bits
+
+    all_values = []
+    exp_lower = -bias
+    for S in [-1.0, 1.0]:
+        for E_str_iter in product(*[[0, 1]] * num_exponent_bits):
+            for F_str_iter in product(*[[0, 1]] * num_fraction_bits):
+                E_str = "".join(str(i) for i in E_str_iter)
+                F_str = "".join(str(i) for i in F_str_iter)
+
+                # encoded exponent
+                E_enc = decode_binary_str(E_str)
+                E_eff = E_enc - bias
+                if E_eff == exp_lower:
+                    is_subnormal = 1
+                else:
+                    is_subnormal = 0
+
+                F_enc = decode_binary_str(F_str) * 2**-num_fraction_bits
+                F_eff = F_enc + 1 - is_subnormal
+
+                fp8_val = S * 2.0 ** (E_enc - bias + is_subnormal) * F_eff
+                all_values.append(fp8_val)
+    res = np.array(all_values)
+    res = np.sort(res)
+    return res
+
+
+if __name__ == "__main__":
+    
+    print("------ listing all possible values in fp4 ------")
+    print(f"fp4-e2m1: {generate_all_values_fp(num_total_bits=4, num_exponent_bits=2, bias=1)}")
+    print(f"fp4-e1m2: {generate_all_values_fp(num_total_bits=4, num_exponent_bits=1, bias=0)}")
+    print("-----------------------------------------------")
+    
+    a = torch.randn(3, 4).cuda() * 0.01
+    # a = torch.tensor([[-0.1, 0.2, -0.3], [0.4, -0.5, 0.6], [-0.7, 0.8, -0.9]]).cuda()
+    # a = torch.tensor([[-0.01, 0.48, -0.967], [1.623, -2.222, 2.467], [-2.874, 3.3699, -3.457]]).cuda()
+    
+    # data, meta = simu_cast_to_fp4_using_scaling_meta(a)
+    # # b = ScalingTensor(data, meta)     # currently not supported, because te not support kFloat4
+    # b = data * meta.scale_inv
+    
+    b = simu_cast_to_fp4(a, format='e1m2', debug_info=True)
+    
+    print(f"Original tensor: {a}")
+    print(f"Simulated casted tensor: {b}")

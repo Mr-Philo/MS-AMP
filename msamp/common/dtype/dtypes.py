@@ -8,6 +8,7 @@ import torch
 
 setattr(torch, 'fp8e4m3', torch.uint8)
 setattr(torch, 'fp8e5m2', torch.int8)
+setattr(torch, 'fp4', torch.uint8)
 
 
 @dataclass
@@ -34,13 +35,15 @@ class Dtypes:
     kbfloat16 = QType(name='kBFloat16', value=4)
     kfloat8_e4m3 = QType(name='kFloat8E4M3', value=5)
     kfloat8_e5m2 = QType(name='kFloat8E5M2', value=6)
+    kfloat4 = QType(name='kFloat4', value=7)
 
     dtype_to_qtype = {
         torch.float16: kfloat16,
         torch.bfloat16: kbfloat16,
         torch.float32: kfloat32,
         torch.fp8e4m3: kfloat8_e4m3,    # type: ignore
-        torch.fp8e5m2: kfloat8_e5m2    # type: ignore
+        torch.fp8e5m2: kfloat8_e5m2,    # type: ignore
+        torch.fp4: kfloat4              # type: ignore
     }
     qtype_to_dtype = dict((v, k) for k, v in dtype_to_qtype.items())
 
@@ -65,7 +68,7 @@ class Dtypes:
         Return:
             flag (bool): whether qtype is fp8.
         """
-        return qtype in [cls.kfloat8_e4m3, cls.kfloat8_e5m2]
+        return qtype in [cls.kfloat8_e4m3, cls.kfloat8_e5m2, cls.kfloat4]
 
     @classmethod
     def get_dtype_from_qtype(cls, qtype):

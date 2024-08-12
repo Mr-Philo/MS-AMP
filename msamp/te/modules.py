@@ -210,8 +210,8 @@ class MSAMPLayerNormLinear(MSAMPTransformerEngineBaseModule, te.LayerNormLinear,
         """
         
         #! manually disabled
-        if DEVELOPER_SET_FP8_ACT:
-            self.if_fp8_activation = True
+        # if DEVELOPER_SET_FP8_ACT:
+        #     self.if_fp8_activation = True
             
         if self.if_fp8_activation:
             qtype = Dtypes.dtype_to_qtype[inp.dtype]
