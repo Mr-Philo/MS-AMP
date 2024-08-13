@@ -13,6 +13,14 @@ from msamp.common.dtype import Dtypes
 from msamp.common.tensor import ScalingTensor
 from msamp.operators.gemm import Gemm
 
+import os
+USE_W_SIMU_FP4 = bool(int(os.getenv('USE_W_SIMU_FP4', 0)))
+USE_A_SIMU_FP4 = bool(int(os.getenv('USE_A_SIMU_FP4', 0)))
+# USE_W_BACKWARD_SIMU_FP4 = bool(int(os.getenv('USE_W_BACKWARD_SIMU_FP4', 0)))      # default same to W forward
+# USE_A_BACKWARD_SIMU_FP4 = bool(int(os.getenv('USE_A_BACKWARD_SIMU_FP4', 0)))      # default same to A forward
+USE_G_BACKWARD_SIMU_FP4 = bool(int(os.getenv('USE_G_BACKWARD_SIMU_FP4', 0)))
+
+from msamp.nn.functional import _simu_cast_to_fp4
 
 class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
     """A linear function with FP8 support, grad accumulation and async communication."""
@@ -48,6 +56,11 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         output_dtype = input.dtype
         input = input.contiguous()
 
+        if USE_W_SIMU_FP4:
+            weight.value = _simu_cast_to_fp4(weight.value, format='e2m1')
+        if USE_A_SIMU_FP4:
+            input = _simu_cast_to_fp4(input, format='e2m1')
+            
         old_meta_group = input_meta.group
         input_meta.group = tp_group
         input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta, sync=sequence_parallel)
@@ -128,6 +141,9 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             total_input = input
 
         grad_output = grad_output.contiguous()
+        if USE_G_BACKWARD_SIMU_FP4:
+            grad_output = _simu_cast_to_fp4(grad_output, format='e1m2')
+            
         input_shape = ctx.input_shape
         output_shape = grad_output.shape
         if len(output_shape) != 2:
