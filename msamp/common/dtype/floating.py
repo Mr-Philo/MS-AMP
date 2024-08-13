@@ -15,7 +15,7 @@ class Floating:
     qfp_max: dict = {}
 
     @staticmethod
-    def _get_fp_max(exp, man, inf_existed=True):
+    def _get_fp_max(exp, man, inf_existed=True, nan_existed=True):
         """Computes the maximum floating point value by exponent and mantissa.
 
         Args:
@@ -28,11 +28,15 @@ class Floating:
         """
         e_bias = np.power(2., exp - 1) - 1
         if inf_existed:
+            assert nan_existed, "Can not specify inf without defining nan. Please check the floating point format definition."
             max_value_exp = (np.power(2.0, exp) - 1) - e_bias - man - 1
             max_value_man = np.power(2.0, man + 1) - 1
         else:
             max_value_exp = (np.power(2.0, exp) - 1) - e_bias - man
-            max_value_man = np.power(2.0, man + 1) - 2
+            if nan_existed:
+                max_value_man = np.power(2.0, man + 1) - 2
+            else:
+                max_value_man = np.power(2.0, man + 1) - 1
         return float(np.power(2.0, max_value_exp) * max_value_man)
 
 
@@ -51,3 +55,12 @@ Floating.qfp_max = {
     Dtypes.kbfloat16: Floating._get_fp_max(exp=8, man=7),    # E8M7
     Dtypes.kfloat32: Floating._get_fp_max(exp=8, man=23),    # E8M23
 }
+
+
+if __name__ == '__main__':
+    print("FP_max for fp4_e1m2:")
+    print(f"When defining nan: {Floating._get_fp_max(1, 2, inf_existed=False, nan_existed=True)}")
+    print(f"When not defining nan: {Floating._get_fp_max(1, 2, inf_existed=False, nan_existed=False)}")
+    print("FP_max for fp4_e2m1:")
+    print(f"When defining nan: {Floating._get_fp_max(2, 1, inf_existed=False, nan_existed=True)}")
+    print(f"When not defining nan: {Floating._get_fp_max(2, 1, inf_existed=False, nan_existed=False)}")

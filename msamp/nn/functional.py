@@ -6,11 +6,59 @@
 import torch
 import torch.nn.functional as F
 
-from msamp.common.dtype import Dtypes
-from msamp.common.tensor import ScalingTensor
+from msamp.common.dtype import Dtypes, Floating
+from msamp.common.tensor import ScalingTensor, ScalingMeta
 from msamp.operators.gemm import Gemm
 from msamp.nn.state import model_state
 from msamp.nn.parameter import ScalingParameter
+
+import os
+
+USE_W_SIMU_FP4 = bool(int(os.getenv('USE_W_SIMU_FP4', 0)))
+USE_A_SIMU_FP4 = bool(int(os.getenv('USE_A_SIMU_FP4', 0)))
+# USE_W_BACKWARD_SIMU_FP4 = bool(int(os.getenv('USE_W_BACKWARD_SIMU_FP4', 0)))      # default same to W forward
+# USE_A_BACKWARD_SIMU_FP4 = bool(int(os.getenv('USE_A_BACKWARD_SIMU_FP4', 0)))      # default same to A forward
+USE_G_BACKWARD_SIMU_FP4 = bool(int(os.getenv('USE_G_BACKWARD_SIMU_FP4', 0)))
+
+
+def _simu_cast_to_fp4(input: torch.Tensor, format: str = 'e1m2', debug_info: bool = False, nan_existed: bool = True):
+    """Simulated casting pytorch tensor to fp4. Note: 
+    Args:
+        input (torch.Tensor): Input tensor to cast.
+        format (str): format of fp4, should be 'e1m2' or 'e2m1'.
+        debug_info (bool): whether to print debug info.
+    Return:
+        torch.Tensor: whose dtype is still torch.float16 or torch.float32, but numerically quantized into fp4.
+    """
+    assert isinstance(input, torch.Tensor), f"Input tensor should be torch.Tensor, but got {type(input)}."
+    assert format in ['e1m2', 'e2m1'], f"Unsupported format: {format}. Please choose from ['e1m2', 'e2m1']."
+
+    if format == 'e1m2':
+        E = 1
+        M = 2
+    else:
+        E = 2
+        M = 1
+
+    amax = input.abs().max()
+    scale = torch.ones((), device='cuda')
+    fp_max = Floating._get_fp_max(E, M, inf_existed=False, nan_existed=nan_existed)
+
+    margin = 0
+    print(f"amax: {amax}, scale: {scale}, fp_max: {fp_max}, margin: {margin}") if debug_info else None
+    sf = ScalingMeta.compute_scaling_factor(amax, scale, fp_max, margin)
+    print(f"computed scaling factor: {sf}") if debug_info else None
+
+    sf = sf * 2     #! Manually add for fp4. This is to adapt to the quantization grid of fp4 (0.5) since the precision of fp4 is too low.
+    result = input.view(1, -1) * sf      # view maybe not needed
+    print(f"casted result: {result.view_as(input)}") if debug_info else None
+    result = torch.round(result)
+    result = result.view_as(input)
+    # result = result.to(torch.uint4)       # currently not supported
+    print(f"result(in torch.uint-like style): {result}") if debug_info else None
+
+    result = result / sf
+    return result
 
 
 class _FP8GemmFunction(torch.autograd.Function):
@@ -42,6 +90,10 @@ class _FP8GemmFunction(torch.autograd.Function):
         ctx.metas = metas
         model_state.check_metas_in_flat(metas)
         input_meta = metas['input']
+        if USE_W_SIMU_FP4:
+            weight.value = _simu_cast_to_fp4(weight.value, format='e2m1')
+        if USE_A_SIMU_FP4:
+            input = _simu_cast_to_fp4(input, format='e2m1')
         input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta)
         weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
 
@@ -73,6 +125,8 @@ class _FP8GemmFunction(torch.autograd.Function):
         """
         # pytorch has a bug that output_grad.strides is 0. Use .contiguous() to fix it.
         output_grad = output_grad.contiguous()
+        if USE_G_BACKWARD_SIMU_FP4:
+            output_grad = _simu_cast_to_fp4(output_grad, format='e1m2')
 
         # We assign gradients to x.grad directly.
         metas = ctx.metas
