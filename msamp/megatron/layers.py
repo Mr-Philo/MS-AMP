@@ -14,6 +14,9 @@ from msamp.common.tensor import ScalingTensor
 from msamp.operators.gemm import Gemm
 
 
+PRINT_INFO = True
+
+
 class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
     """A linear function with FP8 support, grad accumulation and async communication."""
     @staticmethod
@@ -60,8 +63,9 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         weight_fp8.requires_grad = weight.requires_grad
 
         # save tensors
-        ctx.input_fp8 = input_fp8
-        ctx.weight_fp8 = weight_fp8
+        ctx.input_fp8_sf = input_fp8.meta
+        ctx.weight_fp8_sf = weight_fp8.meta
+        ctx.save_for_backward(input_fp8.value.view(dtype=torch.float16), weight_fp8.value.view(dtype=torch.float16))
         ctx.weight = weight
 
         dim_size = list(input.size())
@@ -100,8 +104,9 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         Returns:
             A tuple of gradients of the arguments.
         """
-        input_fp8 = ctx.input_fp8
-        weight_fp8 = ctx.weight_fp8
+        input_fp8_fp16, weight_fp8_fp16 = ctx.saved_tensors
+        input_fp8 = ScalingTensor(input_fp8_fp16.view(dtype=torch.uint8), meta=ctx.input_fp8_sf)
+        weight_fp8 = ScalingTensor(weight_fp8_fp16.view(dtype=torch.uint8), meta=ctx.weight_fp8_sf)
         input = input_fp8.value
         output_qtype = ctx.output_qtype
         metas = ctx.metas
@@ -189,4 +194,9 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         if ctx.async_grad_allreduce:
             handle.wait()
 
+        global PRINT_INFO
+        if PRINT_INFO:
+            print("[INFO] check FP8LinearWithGradAccumulationAndAsyncCommunication: we got here")
+            PRINT_INFO = False
+            
         return grad_input, grad_weight, grad_bias, None, None, None
