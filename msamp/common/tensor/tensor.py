@@ -960,43 +960,35 @@ def simu_cast_to_fp4_using_scaling_meta(input: torch.Tensor):
 
 def simu_cast_to_fp4(input: torch.Tensor, format: str = 'e1m2', debug_info: bool = False, nan_existed: bool = True):
     """Simulated casting pytorch tensor to fp4. Note: 
-
     Args:
         input (torch.Tensor): Input tensor to cast.
         format (str): format of fp4, should be 'e1m2' or 'e2m1'.
         debug_info (bool): whether to print debug info.
-
     Return:
         torch.Tensor: whose dtype is still torch.float16 or torch.float32, but numerically quantized into fp4.
     """
     assert isinstance(input, torch.Tensor), f"Input tensor should be torch.Tensor, but got {type(input)}."
     assert format in ['e1m2', 'e2m1'], f"Unsupported format: {format}. Please choose from ['e1m2', 'e2m1']."
-    
-    if format == 'e1m2':
-        E = 1
-        M = 2
-    else:
-        E = 2
-        M = 1
+
+    E, M = (1, 2) if format == 'e1m2' else (2, 1)
 
     amax = input.abs().max()
-    scale = torch.ones((), device='cuda')
+    scale = torch.ones((), device=input.device)
     fp_max = Floating._get_fp_max(E, M, inf_existed=False, nan_existed=nan_existed)
 
     margin = 0
-    print(f"amax: {amax}, scale: {scale}, fp_max: {fp_max}, margin: {margin}") if debug_info else None
-    sf = ScalingMeta.compute_scaling_factor(amax, scale, fp_max, margin)
-    print(f"computed scaling factor: {sf}") if debug_info else None
-    
-    sf = sf * 2     #! Manually add for fp4. This is to adapt to the quantization grid of fp4 (0.5) since the precision of fp4 is too low.
-    result = input.view(1, -1) * sf      # view maybe not needed
-    print(f"casted result: {result.view_as(input)}") if debug_info else None
-    result = torch.round(result)
-    result = result.view_as(input)
-    # result = result.to(torch.uint4)       # currently not supported
-    print(f"result(in torch.uint-like style): {result}") if debug_info else None
+    sf = ScalingMeta.compute_scaling_factor(amax, scale, fp_max, margin) * 2
+    #! Manually double sf for fp4. This is to adapt to the quantization grid of fp4 (0.5) since the precision of fp4 is too low.
+    if debug_info:
+        print(f"amax: {amax}, scale: {scale}, fp_max: {fp_max}, margin: {margin}")
+        print(f"computed scaling factor: {sf}")
 
-    result = result / sf
+    result = torch.round(input.view(1, -1) * sf).view_as(input)
+    if debug_info:
+        # result = result.to(torch.uint4)       # currently not supported
+        print(f"result(in torch.uint-like style): {result}")
+
+    result.div_(sf)
     return result
 
 @staticmethod
