@@ -57,7 +57,11 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         input = input.contiguous()
 
         if USE_W_SIMU_FP4:
-            weight.value = _simu_cast_to_fp4(weight.value, format='e2m1')
+            fp4_weight = weight
+            fp4_weight.value = _simu_cast_to_fp4(weight.value, format='e2m1')
+            weight_fp8 = fp4_weight.cast(Dtypes.kfloat8_e4m3)
+        else:
+            weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
         if USE_A_SIMU_FP4:
             input = _simu_cast_to_fp4(input, format='e2m1')
             
@@ -69,7 +73,6 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         input_fp8.requires_grad = input.requires_grad
         input = input_fp8.value
 
-        weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
         weight_fp8.requires_grad = weight.requires_grad
 
         # save tensors

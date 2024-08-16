@@ -52,6 +52,7 @@ def _simu_cast_to_fp4(input: torch.Tensor, format: str = 'e1m2', debug_info: boo
         print(f"result(in torch.uint-like style): {result}")
 
     result.div_(sf)
+    result.requires_grad = input.requires_grad
     return result
 
 
@@ -85,11 +86,15 @@ class _FP8GemmFunction(torch.autograd.Function):
         model_state.check_metas_in_flat(metas)
         input_meta = metas['input']
         if USE_W_SIMU_FP4:
-            weight.value = _simu_cast_to_fp4(weight.value, format='e2m1')
+            fp4_weight = weight
+            fp4_weight.value = _simu_cast_to_fp4(weight.value, format='e2m1')
+            weight_fp8 = fp4_weight.cast(Dtypes.kfloat8_e4m3)
+        else:
+            weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
         if USE_A_SIMU_FP4:
             input = _simu_cast_to_fp4(input, format='e2m1')
         input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta)
-        weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
+        
 
         ctx.input_fp8 = input_fp8
         ctx.input_fp8.requires_grad = input.requires_grad
@@ -240,3 +245,21 @@ class FunctionalOverider:
 
 
 FunctionalOverider.override()
+
+
+if __name__ == '__main__':
+    
+    a = torch.randn(3, 4).cuda() * 0.01
+    # a = torch.tensor([[-0.1, 0.2, -0.3], [0.4, -0.5, 0.6], [-0.7, 0.8, -0.9]]).cuda()
+    # a = torch.tensor([[-0.01, 0.48, -0.967], [1.623, -2.222, 2.467], [-2.874, 3.3699, -3.457]]).cuda()
+
+    # data, meta = simu_cast_to_fp4_using_scaling_meta(a)
+    # # b = ScalingTensor(data, meta)     # currently not supported, because te not support kFloat4
+    # b = data * meta.scale_inv
+
+    b = _simu_cast_to_fp4(a, format='e1m2', debug_info=True)
+    c = b.cast(Dtypes.kfloat8_e4m3)
+
+    print(f"Original tensor: {a}")
+    print(f"Simulated casted tensor to fp4: {b}")
+    print(f"Double casted tensor to fp8: {c}")
