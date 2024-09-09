@@ -8,9 +8,15 @@ import math
 import torch
 import torch.nn.functional as F
 from megatron.core import mpu, tensor_parallel
-from megatron.optimizer.optimizer import MixedPrecisionOptimizer, _zero_grad_group_helper
-from megatron.optimizer.distrib_optimizer import DistributedOptimizer, Range
-from megatron.utils import print_rank_0
+try:
+    from megatron.optimizer.optimizer import MixedPrecisionOptimizer, _zero_grad_group_helper
+    from megatron.utils import print_rank_0
+    from megatron.optimizer.distrib_optimizer import DistributedOptimizer, Range
+except ImportError:
+    from megatron.core.optimizer.optimizer import MixedPrecisionOptimizer, _zero_grad_group_helper
+    from megatron.training import print_rank_0
+    from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer, Range
+
 
 from msamp.common.dtype import Dtypes
 from msamp.common.tensor import ScalingTensor, ScalingMeta

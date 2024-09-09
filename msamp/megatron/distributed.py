@@ -7,7 +7,13 @@ import math
 
 import torch
 from megatron.core import mpu
-from megatron.model.distributed import MemoryBuffer, DistributedDataParallelBase
+try:
+    from megatron.model.distributed import MemoryBuffer, DistributedDataParallelBase
+    USE_NEW_DDP = False
+except ImportError:
+    from megatron.core.transformer import MegatronModule as DistributedDataParallelBase
+    from megatron.core.utils import GlobalMemoryBuffer as MemoryBuffer
+    USE_NEW_DDP = True
 
 from msamp.common.dtype import Dtypes
 from msamp.common.tensor import ScalingMeta, ScalingTensor
@@ -65,14 +71,14 @@ class FP8DistributedDataParallel(DistributedDataParallelBase):
 
             # First calculate total number of elements per type.
             type_num_elements = {}
-            fp8_params = []
+            fp8_params = []     # todo: modified
             for param in self.module.parameters():
                 if param.requires_grad:
-                    if torch.is_tensor(param):
+                    if torch.is_tensor(param):      # todo
                         dtype = _get_buffer_type(param)
                         type_num_elements[dtype] = type_num_elements.get(dtype, 0) + param.data.nelement()
                     else:
-                        fp8_params.append(param)
+                        fp8_params.append(param)        # todo
 
             # Allocate the buffer.
             for dtype, num_elements in type_num_elements.items():
@@ -85,13 +91,13 @@ class FP8DistributedDataParallel(DistributedDataParallelBase):
                     int(math.ceil(num_elements / data_parallel_world_size))
 
                 # Allocate grad buffer.
-                self._grad_buffers[dtype] = MemoryBuffer(num_elements, num_elements_padded, dtype)
+                self._grad_buffers[dtype] = MemoryBuffer(num_elements, num_elements_padded, dtype)      #* to notice. No MemoryBuffer in the latest version of Megatron-LM
 
             # Assume the back prop order is reverse the params order,
             # store the start index for the gradients.
             for param in self.module.parameters():
                 if param.requires_grad:
-                    # Skip ScalingTensor.
+                    # Skip ScalingTensor.           # todo
                     if not torch.is_tensor(param):
                         continue
                     dtype = _get_buffer_type(param)
@@ -104,7 +110,7 @@ class FP8DistributedDataParallel(DistributedDataParallelBase):
                         type_num_elements[dtype] + param.data.nelement(),
                     )
 
-            # Create MemoryBuffer for FP8.
+            # Create MemoryBuffer for FP8.      # todo: this whole block
             self._grad_buffer_num_params = [0 for _ in range(data_parallel_world_size)]
             if len(fp8_params) > 0:
                 self._grad_buffer_param_index_map[self.wgrad_dtype] = {}
@@ -152,6 +158,7 @@ class FP8DistributedDataParallel(DistributedDataParallelBase):
                 self._fp8_main_grad_scale_invs = scale_invs
                 self._fp8_main_grad_amaxs = amaxs
                 self._scaling_grads = scaling_grads
+            # todo: finish todo block
 
             # Backward hook.
             # Accumulation function for the gradients. We need
@@ -160,18 +167,18 @@ class FP8DistributedDataParallel(DistributedDataParallelBase):
             # Loop over all the parameters in the model.
             for param in self.module.parameters():
                 if param.requires_grad:
-                    if torch.is_tensor(param):
+                    if torch.is_tensor(param):      # todo
                         # Expand so we get access to grad_fn.
                         param_tmp = param.expand_as(param)
                         # Get the gradient accumulator function.
                         grad_acc = param_tmp.grad_fn.next_functions[0][0]
                         grad_acc.register_hook(self._make_param_hook(param))
                     else:
-                        hook = self._fp8_make_param_hook(param)
+                        hook = self._fp8_make_param_hook(param)     # todo
                         grad_acc = param.register_backward_post_hook(hook)
                     self.grad_accs.append(grad_acc)
 
-    def _fp8_make_param_hook(self, param):
+    def _fp8_make_param_hook(self, param):   # todo
         """Create the all-reduce hook for backprop for FP8 parameter."""
 
         # Hook used for back-prop.
