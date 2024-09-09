@@ -41,6 +41,7 @@ def _simu_cast_to_fp4(input: torch.Tensor, format: str = 'e1m2', debug_info: boo
 
     margin = 0
     sf = ScalingMeta.compute_scaling_factor(amax, scale, fp_max, margin) * 2
+    # sf = ScalingMeta.compute_scaling_factor(amax, scale, fp_max, margin)
     #! Manually double sf for fp4. This is to adapt to the quantization grid of fp4 (0.5) since the precision of fp4 is too low.
     if debug_info:
         print(f"amax: {amax}, scale: {scale}, fp_max: {fp_max}, margin: {margin}")
@@ -86,13 +87,12 @@ class _FP8GemmFunction(torch.autograd.Function):
         model_state.check_metas_in_flat(metas)
         input_meta = metas['input']
         if USE_W_SIMU_FP4:
-            fp4_weight = weight
-            fp4_weight.value = _simu_cast_to_fp4(weight.value, format='e2m1')
-            weight_fp8 = fp4_weight.cast(Dtypes.kfloat8_e4m3)
+            fp4_weight_in_float = _simu_cast_to_fp4(weight.float(), format='e1m2')
+            weight_fp8 = fp4_weight_in_float.cast(Dtypes.kfloat8_e4m3)
         else:
             weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
         if USE_A_SIMU_FP4:
-            input = _simu_cast_to_fp4(input, format='e2m1')
+            input = _simu_cast_to_fp4(input, format='e1m2')
         input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta)
         
 
@@ -124,14 +124,16 @@ class _FP8GemmFunction(torch.autograd.Function):
         """
         # pytorch has a bug that output_grad.strides is 0. Use .contiguous() to fix it.
         output_grad = output_grad.contiguous()
-        if USE_G_BACKWARD_SIMU_FP4:
-            output_grad = _simu_cast_to_fp4(output_grad, format='e1m2')
 
         # We assign gradients to x.grad directly.
         metas = ctx.metas
         ograd_meta = metas['ograd']
         wgrad_meta = metas['wgrad']
-        ograd_fp8, ograd_fp8_t = output_grad.fused_cast_transpose(Dtypes.kfloat8_e5m2, meta=ograd_meta)
+        if USE_G_BACKWARD_SIMU_FP4:
+            fp4_grad_output_in_float = _simu_cast_to_fp4(output_grad, format='e2m1')
+            ograd_fp8, ograd_fp8_t = fp4_grad_output_in_float.fused_cast_transpose(Dtypes.kfloat8_e5m2, meta=ograd_meta)
+        else:
+            ograd_fp8, ograd_fp8_t = output_grad.fused_cast_transpose(Dtypes.kfloat8_e5m2, meta=ograd_meta)
 
         if ctx.input_fp8.requires_grad:
             weight_fp8_t = ctx.weight_fp8.fp8_transpose()
@@ -251,7 +253,7 @@ if __name__ == '__main__':
     
     a = torch.randn(3, 4).cuda() * 0.01
     # a = torch.tensor([[-0.1, 0.2, -0.3], [0.4, -0.5, 0.6], [-0.7, 0.8, -0.9]]).cuda()
-    # a = torch.tensor([[-0.01, 0.48, -0.967], [1.623, -2.222, 2.467], [-2.874, 3.3699, -3.457]]).cuda()
+    a = torch.tensor([[-0.01, 0.48, -0.967], [1.623, -2.222, 2.467], [-2.474, 2.9699, -2.757]]).cuda()
 
     # data, meta = simu_cast_to_fp4_using_scaling_meta(a)
     # # b = ScalingTensor(data, meta)     # currently not supported, because te not support kFloat4
@@ -259,7 +261,9 @@ if __name__ == '__main__':
 
     b = _simu_cast_to_fp4(a, format='e1m2', debug_info=True)
     c = b.cast(Dtypes.kfloat8_e4m3)
+    d = c.cast(Dtypes.kfloat16)
 
     print(f"Original tensor: {a}")
     print(f"Simulated casted tensor to fp4: {b}")
-    print(f"Double casted tensor to fp8: {c}")
+    print(f"Double casted tensor to fp8: {c}, value: {c.value}")
+    print(f"FP8 casted tensor to fp16: {d}, value: {d.value}")
