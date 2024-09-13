@@ -86,13 +86,12 @@ class _FP8GemmFunction(torch.autograd.Function):
         model_state.check_metas_in_flat(metas)
         input_meta = metas['input']
         if USE_W_SIMU_FP4:
-            fp4_weight = weight
-            fp4_weight.value = _simu_cast_to_fp4(weight.value, format='e2m1')
-            weight_fp8 = fp4_weight.cast(Dtypes.kfloat8_e4m3)
+            fp4_weight_in_float = _simu_cast_to_fp4(weight.float(), format='e1m2')
+            weight_fp8 = fp4_weight_in_float.cast(Dtypes.kfloat8_e4m3)
         else:
             weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
         if USE_A_SIMU_FP4:
-            input = _simu_cast_to_fp4(input, format='e2m1')
+            input = _simu_cast_to_fp4(input, format='e1m2')
         input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta)
         
 
@@ -124,14 +123,16 @@ class _FP8GemmFunction(torch.autograd.Function):
         """
         # pytorch has a bug that output_grad.strides is 0. Use .contiguous() to fix it.
         output_grad = output_grad.contiguous()
-        if USE_G_BACKWARD_SIMU_FP4:
-            output_grad = _simu_cast_to_fp4(output_grad, format='e1m2')
 
         # We assign gradients to x.grad directly.
         metas = ctx.metas
         ograd_meta = metas['ograd']
         wgrad_meta = metas['wgrad']
-        ograd_fp8, ograd_fp8_t = output_grad.fused_cast_transpose(Dtypes.kfloat8_e5m2, meta=ograd_meta)
+        if USE_G_BACKWARD_SIMU_FP4:
+            fp4_output_grad_in_float = _simu_cast_to_fp4(output_grad, format='e2m1')
+            ograd_fp8, ograd_fp8_t = fp4_output_grad_in_float.fused_cast_transpose(Dtypes.kfloat8_e5m2, meta=ograd_meta)
+        else:
+            ograd_fp8, ograd_fp8_t = output_grad.fused_cast_transpose(Dtypes.kfloat8_e5m2, meta=ograd_meta)
 
         if ctx.input_fp8.requires_grad:
             weight_fp8_t = ctx.weight_fp8.fp8_transpose()

@@ -57,17 +57,18 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         input = input.contiguous()
 
         if USE_W_SIMU_FP4:
-            fp4_weight = weight
-            fp4_weight.value = _simu_cast_to_fp4(weight.value, format='e2m1')
-            weight_fp8 = fp4_weight.cast(Dtypes.kfloat8_e4m3)
+            fp4_weight_in_float = _simu_cast_to_fp4(weight.float(), format='e1m2')
+            weight_fp8 = fp4_weight_in_float.cast(Dtypes.kfloat8_e4m3)
         else:
             weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
-        if USE_A_SIMU_FP4:
-            input = _simu_cast_to_fp4(input, format='e2m1')
             
         old_meta_group = input_meta.group
         input_meta.group = tp_group
-        input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta, sync=sequence_parallel)
+        if USE_A_SIMU_FP4:
+            fp4_input = _simu_cast_to_fp4(input, format='e1m2')
+            input_fp8 = fp4_input.cast(Dtypes.kfloat8_e4m3, meta=input_meta, sync=sequence_parallel)
+        else:
+            input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta, sync=sequence_parallel)
         input_meta.group = old_meta_group
 
         input_fp8.requires_grad = input.requires_grad
@@ -144,14 +145,17 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             total_input = input
 
         grad_output = grad_output.contiguous()
-        if USE_G_BACKWARD_SIMU_FP4:
-            grad_output = _simu_cast_to_fp4(grad_output, format='e1m2')
             
         input_shape = ctx.input_shape
         output_shape = grad_output.shape
         if len(output_shape) != 2:
             grad_output = grad_output.view(-1, output_shape[-1])
-        grad_output_fp8, grad_output_fp8_t = grad_output.fused_cast_transpose(Dtypes.kfloat8_e5m2, meta=ograd_meta)
+            
+        if USE_G_BACKWARD_SIMU_FP4:
+            fp4_grad_output_in_float = _simu_cast_to_fp4(grad_output, format='e2m1')
+            grad_output_fp8, grad_output_fp8_t = fp4_grad_output_in_float.fused_cast_transpose(Dtypes.kfloat8_e5m2, meta=ograd_meta)
+        else:
+            grad_output_fp8, grad_output_fp8_t = grad_output.fused_cast_transpose(Dtypes.kfloat8_e5m2, meta=ograd_meta)
 
         # grad_input
         weight_fp8_t = weight_fp8.fp8_transpose()
