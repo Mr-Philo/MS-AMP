@@ -16,8 +16,8 @@ from msamp.operators.gemm import Gemm
 import os
 USE_W_SIMU_FP4 = bool(int(os.getenv('USE_W_SIMU_FP4', 0)))
 USE_A_SIMU_FP4 = bool(int(os.getenv('USE_A_SIMU_FP4', 0)))
-# USE_W_BACKWARD_SIMU_FP4 = bool(int(os.getenv('USE_W_BACKWARD_SIMU_FP4', 0)))      # default same to W forward
-# USE_A_BACKWARD_SIMU_FP4 = bool(int(os.getenv('USE_A_BACKWARD_SIMU_FP4', 0)))      # default same to A forward
+USE_W_BACKWARD_SIMU_FP4 = bool(int(os.getenv('USE_W_BACKWARD_SIMU_FP4', USE_W_SIMU_FP4)))      # default same to W forward
+USE_A_BACKWARD_SIMU_FP4 = bool(int(os.getenv('USE_A_BACKWARD_SIMU_FP4', USE_A_SIMU_FP4)))      # default same to A forward
 USE_G_BACKWARD_SIMU_FP4 = bool(int(os.getenv('USE_G_BACKWARD_SIMU_FP4', 0)))
 
 from msamp.nn.functional import _simu_cast_to_fp4
@@ -56,19 +56,31 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         output_dtype = input.dtype
         input = input.contiguous()
 
-        if USE_W_SIMU_FP4:
+        if not USE_W_SIMU_FP4:
+            weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
+            ctx.weight_fp8 = weight_fp8
+        else:
             fp4_weight_in_float = _simu_cast_to_fp4(weight.float(), format='e1m2')
             weight_fp8 = fp4_weight_in_float.cast(Dtypes.kfloat8_e4m3)
-        else:
-            weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
+            if USE_W_BACKWARD_SIMU_FP4:
+                ctx.weight_fp8 = weight_fp8
+            else:
+                ctx.weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
             
         old_meta_group = input_meta.group
         input_meta.group = tp_group
-        if USE_A_SIMU_FP4:
-            fp4_input = _simu_cast_to_fp4(input, format='e1m2')
-            input_fp8 = fp4_input.cast(Dtypes.kfloat8_e4m3, meta=input_meta, sync=sequence_parallel)
-        else:
+        
+        if not USE_A_SIMU_FP4:
             input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta, sync=sequence_parallel)
+            ctx.input_fp8 = input_fp8
+        else:
+            fp4_input = _simu_cast_to_fp4(input, format='e1m2', channel_wise=True)
+            input_fp8 = fp4_input.cast(Dtypes.kfloat8_e4m3, meta=input_meta, sync=sequence_parallel)
+            if USE_A_BACKWARD_SIMU_FP4:
+                ctx.input_fp8 = input_fp8
+            else:
+                ctx.input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta, sync=sequence_parallel)
+            
         input_meta.group = old_meta_group
 
         input_fp8.requires_grad = input.requires_grad
@@ -77,8 +89,6 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         weight_fp8.requires_grad = weight.requires_grad
 
         # save tensors
-        ctx.input_fp8 = input_fp8
-        ctx.weight_fp8 = weight_fp8
         ctx.weight = weight
 
         dim_size = list(input.size())
