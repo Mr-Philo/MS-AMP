@@ -26,7 +26,7 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
     """A linear function with FP8 support, grad accumulation and async communication."""
     @staticmethod
     @custom_fwd
-    def forward(ctx, input, weight, bias, gradient_accumulation_fusion, async_grad_allreduce, sequence_parallel):
+    def forward(ctx, input, weight, bias, gradient_accumulation_fusion, async_grad_allreduce, sequence_parallel, use_fp8_computation):
         """Forward pass.
 
         Args:
@@ -37,14 +37,48 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             gradient_accumulation_fusion (bool): Whether to fuse gradient accumulation.
             async_grad_allreduce (bool): Whether to use asynchronous all-reduce.
             sequence_parallel (bool): Whether to use sequence parallel.
+            use_fp8_computation (bool): Whether to use fp8 gemm function.
 
         Returns:
             torch.Tensor: Output tensor.
         """
+        
+        #? this is for fp16 mix fp8 computation.
+        if not use_fp8_computation and False:         # use native fp32 computation. refer to megatron-dev/megatron/core/tensor_parallel/layers.py
+            ctx.use_fp8_computation = False         #! added. this is for specific weight(ScalingTensor) update in backward pass
+            ctx.fp8_weight = weight                 #! added
+            
+            weight = weight.to(input.dtype)     #! added. see MS-AMP/msamp/common/tensor/tensor.py, Line 160
+            ctx.save_for_backward(input, weight)
+            ctx.use_bias = bias is not None
+            ctx.gradient_accumulation_fusion = gradient_accumulation_fusion
+            ctx.async_grad_allreduce = async_grad_allreduce
+            ctx.sequence_parallel = sequence_parallel
+            
+            if sequence_parallel:
+                world_size = get_tensor_model_parallel_world_size()
+                dim_size = list(input.size())
+                dim_size[0] = dim_size[0] * world_size
+
+                all_gather_buffer = get_global_memory_buffer().get_tensor(dim_size, input.dtype, "mpu")
+                torch.distributed._all_gather_base(
+                    all_gather_buffer, input, group=get_tensor_model_parallel_group()
+                )
+                total_input = all_gather_buffer
+            else:
+                total_input = input
+
+            output = torch.matmul(total_input, weight.t())
+            if bias is not None:
+                output = output + bias
+            return output
+        
+        # fp8 logic
         ctx.use_bias = bias is not None
         ctx.gradient_accumulation_fusion = gradient_accumulation_fusion
         ctx.async_grad_allreduce = async_grad_allreduce
         ctx.sequence_parallel = sequence_parallel
+        ctx.use_fp8_computation = True
 
         input_shape = input.shape
         ctx.input_shape = input_shape
@@ -56,7 +90,10 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         output_dtype = input.dtype
         input = input.contiguous()
 
-        if not USE_W_SIMU_FP4:
+        #? this is for fp8 mix simu-fp4 computation.
+        use_fp4_computation = use_fp8_computation       # change name for better understanding
+            
+        if (not USE_W_SIMU_FP4) or (not use_fp4_computation):
             weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
             ctx.weight_fp8 = weight_fp8
         else:
@@ -70,11 +107,11 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         old_meta_group = input_meta.group
         input_meta.group = tp_group
         
-        if not USE_A_SIMU_FP4:
+        if (not USE_A_SIMU_FP4) or (not use_fp4_computation):
             input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta, sync=sequence_parallel)
             ctx.input_fp8 = input_fp8
         else:
-            fp4_input = _simu_cast_to_fp4(input, format='e1m2', channel_wise=True)
+            fp4_input = _simu_cast_to_fp4(input, format='e1m2', channel_wise=True, use_fp8_sf=False)
             input_fp8 = fp4_input.cast(Dtypes.kfloat8_e4m3, meta=input_meta, sync=sequence_parallel)
             if USE_A_BACKWARD_SIMU_FP4:
                 ctx.input_fp8 = input_fp8
@@ -127,6 +164,96 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         Returns:
             A tuple of gradients of the arguments.
         """
+        
+        if not ctx.use_fp8_computation and False:         # temporary disable
+            input, weight = ctx.saved_tensors
+            use_bias = ctx.use_bias
+
+            if ctx.sequence_parallel:
+                world_size = get_tensor_model_parallel_world_size()
+                dim_size = list(input.size())
+                dim_size[0] = dim_size[0] * world_size
+
+                all_gather_buffer = get_global_memory_buffer().get_tensor(dim_size, input.dtype, "mpu")
+                handle = torch.distributed._all_gather_base(
+                    all_gather_buffer, input, group=get_tensor_model_parallel_group(), async_op=True
+                )
+
+                # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
+                # gather is scheduled before the input gradient computation
+                total_input = all_gather_buffer
+            else:
+                total_input = input
+            grad_input = grad_output.matmul(weight)
+
+            if ctx.sequence_parallel:
+                handle.wait()
+
+            # Doing gather + slicing during the NeMo forward pass can make this tensor
+            # not be contiguous. PyTorch only checks if the tensor is contiguous, and only
+            # clones it if it's not contiguous:
+            # https://github.com/pytorch/pytorch/blob/c47cf9bc7f9e02f649ab4ed53fe4d35732c92ab6/torch/_refs/__init__.py#L2761
+            grad_output = grad_output.contiguous()
+            # Convert the tensor shapes to 2D for execution compatibility
+            grad_output = grad_output.view(
+                grad_output.shape[0] * grad_output.shape[1], grad_output.shape[2]
+            )
+            total_input = total_input.view(
+                total_input.shape[0] * total_input.shape[1], total_input.shape[2]
+            )
+
+            if ctx.async_grad_allreduce:
+                # Asynchronous all-reduce
+                handle = torch.distributed.all_reduce(
+                    grad_input, group=get_tensor_model_parallel_group(), async_op=True
+                )
+                # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
+                # all-reduce is scheduled before the weight gradient computation
+
+            if ctx.sequence_parallel:
+                assert not ctx.async_grad_allreduce
+                dim_size = list(input.size())
+                sub_grad_input = torch.empty(
+                    dim_size, dtype=input.dtype, device=torch.cuda.current_device(), requires_grad=False
+                )
+                # reduce_scatter
+                handle = torch.distributed._reduce_scatter_base(
+                    sub_grad_input, grad_input, group=get_tensor_model_parallel_group(), async_op=True
+                )
+                # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
+                # reduce scatter is scheduled before the weight gradient computation
+
+            if ctx.gradient_accumulation_fusion:
+                # if weight.main_grad.dtype == torch.float32:
+                #     fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(
+                #         total_input, grad_output, weight.main_grad
+                #     )
+                # elif weight.main_grad.dtype in (torch.float16, torch.bfloat16):
+                #     fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp16(
+                #         total_input, grad_output, weight.main_grad
+                #     )
+                # else:
+                #     raise RuntimeError("Unsupported gradient type for gradient accumulation fusion")
+                # grad_weight = None
+                raise NotImplementedError("gradient_accumulation_fusion not supported for FP8LinearWithGradAccumulationAndAsyncCommunication")
+            else:
+                grad_weight = grad_output.t().matmul(total_input)
+            grad_bias = grad_output.sum(dim=0) if use_bias else None
+            
+            #! added: FP8 Weight Gradient
+            ctx.fp8_weight.backward_grad_update(grad_weight)
+            grad_weight = None
+
+            if ctx.sequence_parallel:
+                handle.wait()
+                return sub_grad_input, grad_weight, grad_bias, None, None, None, None
+
+            if ctx.async_grad_allreduce:
+                handle.wait()
+
+            return grad_input, grad_weight, grad_bias, None, None, None, None
+    
+        # fp8 logic
         input_fp8 = ctx.input_fp8
         weight_fp8 = ctx.weight_fp8
         input = input_fp8.value
@@ -217,9 +344,9 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
 
         if ctx.sequence_parallel:
             handle.wait()
-            return sub_grad_input, grad_weight, grad_bias, None, None, None
+            return sub_grad_input, grad_weight, grad_bias, None, None, None, None
 
         if ctx.async_grad_allreduce:
             handle.wait()
 
-        return grad_input, grad_weight, grad_bias, None, None, None
+        return grad_input, grad_weight, grad_bias, None, None, None, None
