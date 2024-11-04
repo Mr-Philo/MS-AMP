@@ -20,6 +20,10 @@ USE_W_BACKWARD_SIMU_FP4 = bool(int(os.getenv('USE_W_BACKWARD_SIMU_FP4', USE_W_SI
 USE_A_BACKWARD_SIMU_FP4 = bool(int(os.getenv('USE_A_BACKWARD_SIMU_FP4', USE_A_SIMU_FP4)))      # default same to A forward
 USE_G_BACKWARD_SIMU_FP4 = bool(int(os.getenv('USE_G_BACKWARD_SIMU_FP4', 0)))
 
+USE_E1M2 = bool(int(os.getenv('USE_E1M2', 0)))
+USE_E2M1 = bool(int(os.getenv('USE_E2M1', 0)))
+USE_E3M0 = bool(int(os.getenv('USE_E3M0', 0)))
+
 from msamp.nn.functional import _simu_cast_to_fp4
 
 class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
@@ -97,7 +101,15 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
             ctx.weight_fp8 = weight_fp8
         else:
-            fp4_weight_in_float = _simu_cast_to_fp4(weight.float(), format='e1m2')
+            if USE_E1M2:
+                format_str = 'e1m2'
+            elif USE_E2M1:
+                format_str = 'e2m1'
+            elif USE_E3M0:
+                format_str = 'e3m0'
+            else:
+                format_str = 'e2m1'     # default
+            fp4_weight_in_float = _simu_cast_to_fp4(weight.float(), format=format_str)
             weight_fp8 = fp4_weight_in_float.cast(Dtypes.kfloat8_e4m3)
             if USE_W_BACKWARD_SIMU_FP4:
                 ctx.weight_fp8 = weight_fp8
@@ -111,7 +123,7 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta, sync=sequence_parallel)
             ctx.input_fp8 = input_fp8
         else:
-            fp4_input = _simu_cast_to_fp4(input, format='e1m2', channel_wise=True, use_fp8_sf=False)
+            fp4_input = _simu_cast_to_fp4(input, format='e2m1', channel_wise=True)
             input_fp8 = fp4_input.cast(Dtypes.kfloat8_e4m3, meta=input_meta, sync=sequence_parallel)
             if USE_A_BACKWARD_SIMU_FP4:
                 ctx.input_fp8 = input_fp8
@@ -289,7 +301,7 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             grad_output = grad_output.view(-1, output_shape[-1])
             
         if USE_G_BACKWARD_SIMU_FP4:
-            fp4_grad_output_in_float = _simu_cast_to_fp4(grad_output, format='e2m1')
+            fp4_grad_output_in_float = _simu_cast_to_fp4(grad_output, format='e1m2')
             grad_output_fp8, grad_output_fp8_t = fp4_grad_output_in_float.fused_cast_transpose(Dtypes.kfloat8_e5m2, meta=ograd_meta)
         else:
             grad_output_fp8, grad_output_fp8_t = grad_output.fused_cast_transpose(Dtypes.kfloat8_e5m2, meta=ograd_meta)

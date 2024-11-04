@@ -21,43 +21,82 @@ USE_A_BACKWARD_SIMU_FP4 = bool(int(os.getenv('USE_A_BACKWARD_SIMU_FP4', USE_A_SI
 USE_G_BACKWARD_SIMU_FP4 = bool(int(os.getenv('USE_G_BACKWARD_SIMU_FP4', 0)))
 
 
+FP4_QUANTIZATION_TABLE = {
+    # 2-D column tensor
+    'e0m3': torch.tensor([-6.0, -5.0, -4.0, -3.0, -2.0, -1.0,  0.0, 1.0,  2.0, 3.0, 4.0, 5.0, 6.0]).view(-1, 1).cuda(),
+    'e1m2': torch.tensor([-3.0, -2.5, -2.0, -1.5, -1.0, -0.5,  0.0, 0.5,  1.0, 1.5, 2.0, 2.5, 3.0]).view(-1, 1).cuda(),     # eqivalent to e0m3
+    'e2m1': torch.tensor([-4.0, -3.0, -2.0, -1.5, -1.0, -0.5,  0.0, 0.5,  1.0, 1.5, 2.0, 3.0, 4.0]).view(-1, 1).cuda(),
+    'e3m0': torch.tensor([-8.0, -4.0, -2.0, -1.0, -0.5, -0.25, 0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0]).view(-1, 1).cuda(),
+}
+
+FP4_QUANTIZATION_TABLE_WIRHOUT_NAN = {
+    'e0m3': torch.tensor([-7.0, -6.0, -5.0, -4.0, -3.0, -2.0, -1.0,  0.0, 1.0,  2.0, 3.0, 4.0, 5.0, 6.0, 7.0]).view(-1, 1).cuda(),
+    'e1m2': torch.tensor([-3.5, -3.0, -2.5, -2.0, -1.5, -1.0, -0.5,  0.0, 0.5,  1.0, 1.5, 2.0, 2.5, 3.0, 3.5]).view(-1, 1).cuda(),     # eqivalent to e0m3
+    'e2m1': torch.tensor([-6.0, -4.0, -3.0, -2.0, -1.5, -1.0, -0.5,  0.0, 0.5,  1.0, 1.5, 2.0, 3.0, 4.0, 6.0]).view(-1, 1).cuda(),
+    'e3m0': torch.tensor([-16,  -8.0, -4.0, -2.0, -1.0, -0.5, -0.25, 0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16 ]).view(-1, 1).cuda(),
+}
+
+BASE_4_FP4_QUANTIZATION_TABLE = {
+    'e0m3': torch.tensor([-20, -17, -16, -5, -4, -1, 0, 1, 4, 5, 16, 17, 20]).view(-1, 1).cuda(),
+    'e1m2': torch.tensor([-5, -4.25, -4, -1.25, -1, -0.25, 0, 0.25, 1, 1.25, 4, 4.25, 5]).view(-1, 1).cuda(),
+    'e2m1': torch.tensor([-16, -5, -4, -1.25, -1, -0.25, 0, 0.25, 1, 1.25, 4, 5, 16]).view(-1, 1).cuda(),
+    'e3m0': torch.tensor([-64, -16, -4, -1, -0.25, -0.0625, 0, 0.0625, 0.25, 1, 4, 16, 64]).view(-1, 1).cuda(),
+}
+
+
+BASE_4_FP4_QUANTIZATION_TABLE_WIRHOUT_NAN = {
+    'e0m3': torch.tensor([-21, -20, -17, -16, -5, -4, -1, 0, 1, 4, 5, 16, 17, 20, 21]).view(-1, 1).cuda(),
+    'e1m2': torch.tensor([-5.5, -5, -4.25, -4, -1.25, -1, -0.25, 0, 0.25, 1, 1.25, 4, 4.25, 5, 5.5]).view(-1, 1).cuda(),
+    'e2m1': torch.tensor([-20, -16, -5, -4, -1.25, -1, -0.25, 0, 0.25, 1, 1.25, 4, 5, 16, 20]).view(-1, 1).cuda(),
+    'e3m0': torch.tensor([-256, -64, -16, -4, -1, -0.25, -0.0625, 0, 0.0625, 0.25, 1, 4, 16, 64, 256]).view(-1, 1).cuda(),
+}
+
+
 def _simu_cast_to_fp4(
     input: torch.Tensor, 
     format: str = 'e1m2', 
     debug_info: bool = False, 
     nan_existed: bool = True, 
+    asymmetric: bool = False,
     fp8_test: bool = False, 
     int4_test: bool = False,
     channel_wise: bool = False, 
     token_wise: bool = False,
-    use_fp8_sf: bool = False
+    use_fp8_sf: bool = False,
+    base4: bool = False,
 ) -> torch.Tensor:
     
     """Simulated casting pytorch tensor to fp4. Note: 
     Args:
         input (torch.Tensor): Input tensor to cast.
-        format (str): format of fp4, should be 'e1m2' or 'e2m1'.
+        format (str): format of fp4, should be in ['e0m3', 'e1m2', 'e2m1', 'e3m0'].
         debug_info (bool): whether to print debug info.
-        nan_existed (bool): whether to consider nan in the input tensor.
+        nan_existed (bool): whether to consider nan in the input tensor. Default is True.
+        asymmetric (bool): whether to use asymmetric quantization. Default is False.
         fp8_test (bool): whether to test fp8.
         int4_test (bool): whether to test int4.
         channel_wise (bool): whether to quantize the input tensor channel-wisely.
         token_wise (bool): whether to quantize the input tensor token-wisely. cannot be True at the same time with channel_wise.
         use_fp8_sf (bool): whether to use fp8 scaling factor. If True, the scaling factor will be computed in fp8.
+        base4 (bool): whether to use base-4 quantization table. This action will largely expand dynamic range but reduce accuracy. Default is False.
     Return:
         torch.Tensor: whose dtype is still torch.float16 or torch.float32, but numerically quantized into fp4.
     """
     
     assert isinstance(input, torch.Tensor), f"Input tensor should be torch.Tensor, but got {type(input)}."
-    assert format in ['e1m2', 'e2m1'], f"Unsupported format: {format}. Please choose from ['e1m2', 'e2m1']."
+    assert format in ['e0m3', 'e1m2', 'e2m1', 'e3m0'], f"Unsupported format: {format}. Please choose from ['e0m3', 'e1m2', 'e2m1', 'e3m0']."
 
-    E, M = (1, 2) if format == 'e1m2' else (2, 1)
+    E, M = (0, 3) if format == 'e0m3' else (1, 2) if format == 'e1m2' else (2, 1) if format == 'e2m1' else (3, 0)
     if int4_test:
-        E, M = (3, 0)
+        E, M = (0, 3)
     if fp8_test:
         E, M = (4, 3)
 
     shape = input.shape
+    if asymmetric:
+        zeropoint = (input.min() + input.max()) / 2
+        input = input - zeropoint
+        
     if channel_wise:
         # assert len(input.shape) == 2, f"Input tensor should be 2D, but got {len(input.shape)}D. For channel-wise quantization, please make sure the input activation is in @D shape (batchsize*seq_len, channel dim)."
         assert (not token_wise), f"channel_wise and token_wise cannot be True at the same time."
@@ -77,7 +116,8 @@ def _simu_cast_to_fp4(
         amax = input.abs().max()
         scale = torch.ones((), device=input.device)
     
-    fp_max = Floating._get_fp_max(E, M, inf_existed=False, nan_existed=nan_existed) if not int4_test else 6.0
+    # fp_max = Floating._get_fp_max(E, M, inf_existed=False, nan_existed=nan_existed) if not int4_test else 6.0
+    fp_max = 6.0 if E == 0 else 8.0 if M == 0 else Floating._get_fp_max(E, M, inf_existed=False, nan_existed=nan_existed)
     margin = 0
     sf = ScalingMeta.compute_scaling_factor(amax, scale, fp_max, margin)
     if use_fp8_sf:
@@ -87,20 +127,74 @@ def _simu_cast_to_fp4(
         print(f"amax: {amax}, scale: {scale}, fp_max: {fp_max}, margin: {margin}")
         print(f"computed scaling factor: {sf}")
 
-    result = torch.round(input * 2 * sf)        # this * operation can handle matrix-tensor broadcasting. For example, (3, 4) * (4,) -> (3, 4)
-    #! Manually double sf for fp4. This is to adapt the correct quantization grid of fp4 (0.5) to rounding function.
-    #? todo: 现在这个round函数还不是真正的float量化
+    # result = torch.round(input * sf)        # this * operation can handle matrix-tensor broadcasting. For example, (3, 4) * (4,) -> (3, 4)
+    #! look-up table quantization
+    def look_up_quantize(x: torch.Tensor, table: torch.Tensor) -> torch.Tensor:
+        '''
+        'table' tensor should be a 2-D column tensor. if not, using .view(-1, 1) to convert.
+        'table' tensor should be on the same device with 'x'. Default to cuda.
+        '''
+        if len(table.shape) != 2 or table.shape[1] != 1:
+            table = table.view(-1, 1)
+        if table.device != x.device:
+            table = table.to(x.device)
+        if table.dtype != x.dtype:
+            table = table.to(x.dtype)
+        diff_matrix = torch.abs(x.view(1, -1) - table)
+        nearest_index = torch.argmin(diff_matrix, dim=0)
+        return table[nearest_index].view(x.shape)
+    
+    if base4:
+        TABLE = BASE_4_FP4_QUANTIZATION_TABLE if nan_existed else BASE_4_FP4_QUANTIZATION_TABLE_WIRHOUT_NAN
+    else:
+        TABLE = FP4_QUANTIZATION_TABLE if nan_existed else FP4_QUANTIZATION_TABLE_WIRHOUT_NAN
+    result = look_up_quantize(input * sf, TABLE[format]).div(sf)
+    result.requires_grad = input.requires_grad
+    
     if debug_info:
         # result = result.to(torch.uint4)       # currently not supported
-        print(f"result(in torch.uint-like style): {result}")
-
-    result.div_(sf)
-    result.requires_grad = input.requires_grad
+        print(f"result(in torch.uint-like style): {look_up_quantize(input * sf, TABLE[format])}")
     
     if (channel_wise or token_wise) and len(shape) != 2:
         result = result.view(shape[:-1] + (-1, ))
+        
+    if asymmetric:
+        result = result + zeropoint
+        
     return result
 
+
+# currently not used
+def _simu_cast_to_fp4_qualcomm(
+    input: torch.Tensor, 
+    format: str = 'e2m1', 
+    debug_info: bool = False, 
+    nan_existed: bool = True, 
+) -> torch.Tensor:
+    '''
+    This method adapted from https://github.com/Qualcomm-AI-research/FP8-quantization/blob/main/quantization/quantizers/fp8_quantizer.py#L91
+    '''
+    assert isinstance(input, torch.Tensor), f"Input tensor should be torch.Tensor, but got {type(input)}."
+    assert format in ['e1m2', 'e2m1'], f"Unsupported format: {format}. Please choose from ['e1m2', 'e2m1']."
+
+    E, M = (1, 2) if format == 'e1m2' else (2, 1)
+    fp_max = Floating._get_fp_max(E, M, inf_existed=False, nan_existed=nan_existed)
+    bias = 2**E - torch.log2(torch.tensor(fp_max)) + torch.log2(torch.tensor(2 - 2 ** (-M))) - 1
+    xc = input
+    
+    print(torch.floor(torch.log2(torch.abs(xc)) + bias))
+    log_scales = torch.clamp((torch.floor(torch.log2(torch.abs(xc)) + bias)).detach(), max = 1.0)
+    scales = 2.0 ** (log_scales - M - bias)
+    
+    if debug_info:
+        print(f"fp_max: {fp_max}, bias: {bias}, log_scales: {log_scales}, scales: {scales}")
+    
+    result = torch.round(xc / scales)
+    if debug_info:
+        print(f"result(in torch.uint-like style): {result}")
+    result = result * scales
+    result.requires_grad = input.requires_grad
+    return result
 
 class _FP8GemmFunction(torch.autograd.Function):
     """A function provides fp8 gemm forward and backward computations."""
@@ -136,7 +230,7 @@ class _FP8GemmFunction(torch.autograd.Function):
             weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
             ctx.weight_fp8 = weight_fp8
         else:
-            fp4_weight_in_float = _simu_cast_to_fp4(weight.float(), format='e1m2')
+            fp4_weight_in_float = _simu_cast_to_fp4(weight.float(), format='e2m1')
             weight_fp8 = fp4_weight_in_float.cast(Dtypes.kfloat8_e4m3)
             if USE_W_BACKWARD_SIMU_FP4:
                 ctx.weight_fp8 = weight_fp8
@@ -147,7 +241,7 @@ class _FP8GemmFunction(torch.autograd.Function):
             input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta)
             ctx.input_fp8 = input_fp8
         else:
-            fp4_input = _simu_cast_to_fp4(input, format='e1m2', channel_wise=True, use_fp8_sf=False)
+            fp4_input = _simu_cast_to_fp4(input, format='e2m1', channel_wise=True)
             input_fp8 = fp4_input.cast(Dtypes.kfloat8_e4m3, meta=input_meta)
             if USE_A_BACKWARD_SIMU_FP4:
                 ctx.input_fp8 = input_fp8
@@ -187,7 +281,7 @@ class _FP8GemmFunction(torch.autograd.Function):
         ograd_meta = metas['ograd']
         wgrad_meta = metas['wgrad']
         if USE_G_BACKWARD_SIMU_FP4:
-            fp4_output_grad_in_float = _simu_cast_to_fp4(output_grad, format='e2m1')
+            fp4_output_grad_in_float = _simu_cast_to_fp4(output_grad, format='e1m2')
             ograd_fp8, ograd_fp8_t = fp4_output_grad_in_float.fused_cast_transpose(Dtypes.kfloat8_e5m2, meta=ograd_meta)
         else:
             ograd_fp8, ograd_fp8_t = output_grad.fused_cast_transpose(Dtypes.kfloat8_e5m2, meta=ograd_meta)
@@ -312,7 +406,9 @@ if __name__ == '__main__':
     # a = torch.randn(1, 1, 1, 3, 4, dtype=torch.float16).cuda() * 0.01
     # a = torch.tensor([[-0.1, 0.2, -0.3], [0.4, -0.5, 0.6], [-0.7, 0.8, -0.9]]).cuda()
     # a = torch.tensor([[-0.01, 0.48, -0.967], [1.623, -2.222, 2.467], [-2.874, 3.3699, -3.457]]).cuda()
-    a = torch.tensor([[0.01, 0.48, 0.967], [1.623, 2.222, 2.467], [2.874, 3.3699, 3.457]]).cuda()
+    a = torch.tensor([[0.001, 0.048, 0.0967], [0.1623, 0.2222, 0.2467], [0.2874, 0.33699, 0.3957]]).cuda()      # e2m1 format
+    a = torch.tensor([[0.001, 0.048, 0.0997], [0.1503, 0.2002, 0.2497], [0.2974, 0.30699, 0.4001]]).cuda()      # e2m1 format
+    # a = torch.tensor([[0.001, 0.048, 0.0967], [0.1623, 0.2222, 0.2467], [0.2467, 0.2874, 0.2998]]).cuda()       # e1m2 format
     # a = torch.tensor(
     #     [ [ [-0.01,  0.48,   -9.67], 
     #         [1.623,  -2.222, 24.67], ],
@@ -326,7 +422,7 @@ if __name__ == '__main__':
     # b = data * meta.scale_inv
     
     if False:       # test channel-wise quantization or token-wise quantization
-        b = _simu_cast_to_fp4(a, format='e1m2', debug_info=True, channel_wise=True)
+        b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, channel_wise=True)
         # b = _simu_cast_to_fp4(a.permute(0, 2, 1), format='e1m2', debug_info=True, token_wise=True).permute(0, 2, 1)
         c = b.cast(Dtypes.kfloat8_e4m3)
 
@@ -336,10 +432,12 @@ if __name__ == '__main__':
         print(f"ScaingTensor's data: {c.value - 128}")
     
     else:   
-        b = _simu_cast_to_fp4(a, format='e1m2', debug_info=True, fp8_test=True)
-        c = a.cast(Dtypes.kfloat8_e4m3)
+        b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, nan_existed=False, base4=True)
+        # c = a.cast(Dtypes.kfloat8_e4m3)
+        d = b.cast(Dtypes.kfloat8_e5m2)
         
         print(f"Original tensor: {a}, with max value: {a.abs().max()}")
         print(f"Simulated casted tensor to fp8: {b}, with max value: {b.abs().max()}")
-        print(f"MS-AMP casted tensor to fp8: {c}")
-        print(f"ScaingTensor's data: {c.value - 128}")
+        # print(f"MS-AMP casted tensor to fp8: {c}")
+        # print(f"ScaingTensor's data: {c.value - 128}")
+        print(f"Double casted tensor to fp8: {d}")
