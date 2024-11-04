@@ -64,6 +64,8 @@ def _simu_cast_to_fp4(
     token_wise: bool = False,
     use_fp8_sf: bool = False,
     base4: bool = False,
+    outlier_clip: bool = False,
+    clip_threshold: float = 0.97
 ) -> torch.Tensor:
     
     """Simulated casting pytorch tensor to fp4. Note: 
@@ -91,11 +93,14 @@ def _simu_cast_to_fp4(
         E, M = (0, 3)
     if fp8_test:
         E, M = (4, 3)
+        raise NotImplementedError("Currently not supported.")
 
     shape = input.shape
     if asymmetric:
         zeropoint = (input.min() + input.max()) / 2
         input = input - zeropoint
+    if outlier_clip:
+        input = torch.clamp(input, min=torch.quantile(input.float(), 1-clip_threshold), max=torch.quantile(input.float(), clip_threshold))
         
     if channel_wise:
         # assert len(input.shape) == 2, f"Input tensor should be 2D, but got {len(input.shape)}D. For channel-wise quantization, please make sure the input activation is in @D shape (batchsize*seq_len, channel dim)."
@@ -432,7 +437,8 @@ if __name__ == '__main__':
         print(f"ScaingTensor's data: {c.value - 128}")
     
     else:   
-        b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, nan_existed=False, base4=True)
+        # b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, nan_existed=False, base4=True)
+        b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, nan_existed=False, base4=True, outlier_clip=True, clip_threshold=0.97)
         # c = a.cast(Dtypes.kfloat8_e4m3)
         d = b.cast(Dtypes.kfloat8_e5m2)
         
