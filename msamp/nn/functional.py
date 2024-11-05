@@ -13,6 +13,7 @@ from msamp.nn.state import model_state
 from msamp.nn.parameter import ScalingParameter
 
 import os
+import time
 
 USE_W_SIMU_FP4 = bool(int(os.getenv('USE_W_SIMU_FP4', 0)))
 USE_A_SIMU_FP4 = bool(int(os.getenv('USE_A_SIMU_FP4', 0)))
@@ -100,7 +101,20 @@ def _simu_cast_to_fp4(
         zeropoint = (input.min() + input.max()) / 2
         input = input - zeropoint
     if outlier_clip:
-        input = torch.clamp(input, min=torch.quantile(input.float(), 1-clip_threshold), max=torch.quantile(input.float(), clip_threshold))
+        time0 = time.time() if debug_info else None
+        try:
+            input = torch.clamp(input, min=torch.quantile(input.float(), 1-clip_threshold), max=torch.quantile(input.float(), clip_threshold))
+        except RuntimeError:
+            # using chunk-wise quantile to deal with large tensor (element number > 16M)
+            chunk_size = 1e7    # 10M
+            quantiles = []
+            for i in range(0, input.numel(), int(chunk_size)):
+                chunk = input.float().view(-1)[i: i + int(chunk_size)]
+                quantiles.append(torch.quantile(chunk, torch.tensor([1-clip_threshold, clip_threshold]).to(chunk.device)))
+            quantiles_tensor = torch.stack(quantiles)
+            input = torch.clamp(input, min=quantiles_tensor[:, 0].min(), max=quantiles_tensor[:, 1].max())
+        if debug_info:
+            print(f"time for clipping {input.numel()} elements: {time.time() - time0}, computed quantiles: {quantiles_tensor[:, 0].min(), quantiles_tensor[:, 1].max()}")
         
     if channel_wise:
         # assert len(input.shape) == 2, f"Input tensor should be 2D, but got {len(input.shape)}D. For channel-wise quantization, please make sure the input activation is in @D shape (batchsize*seq_len, channel dim)."
