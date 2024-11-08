@@ -86,6 +86,7 @@ def _simu_cast_to_fp4(
         torch.Tensor: whose dtype is still torch.float16 or torch.float32, but numerically quantized into fp4.
     """
     
+    # pre-check for formats
     assert isinstance(input, torch.Tensor), f"Input tensor should be torch.Tensor, but got {type(input)}."
     assert format in ['e0m3', 'e1m2', 'e2m1', 'e3m0'], f"Unsupported format: {format}. Please choose from ['e0m3', 'e1m2', 'e2m1', 'e3m0']."
 
@@ -96,39 +97,49 @@ def _simu_cast_to_fp4(
         E, M = (4, 3)
         raise NotImplementedError("Currently not supported.")
 
+    # pre-check and reshape for channel-wise or token-wise quantization
     shape = input.shape
+    assert not (channel_wise and token_wise), f"channel_wise and token_wise cannot be True at the same time."
+    # assert len(input.shape) == 2, f"Input tensor should be 2D, but got {len(input.shape)}D. For channel-wise quantization, please make sure the input activation is in @D shape (batchsize*seq_len, channel dim)."
+    if (channel_wise or token_wise) and len(shape) != 2:
+        dim = shape[-1]
+        input = input.reshape(-1, dim)
+    
+    # asymmetric quantization    
     if asymmetric:
         zeropoint = (input.min() + input.max()) / 2
         input = input - zeropoint
+        
+    # outlier clipping
     if outlier_clip:
         time0 = time.time() if debug_info else None
-        try:
-            input = torch.clamp(input, min=torch.quantile(input.float(), 1-clip_threshold), max=torch.quantile(input.float(), clip_threshold))
-        except RuntimeError:
-            # using chunk-wise quantile to deal with large tensor (element number > 16M)
-            chunk_size = 1e7    # 10M
-            quantiles = []
-            for i in range(0, input.numel(), int(chunk_size)):
-                chunk = input.float().view(-1)[i: i + int(chunk_size)]
-                quantiles.append(torch.quantile(chunk, torch.tensor([1-clip_threshold, clip_threshold]).to(chunk.device)))
-            quantiles_tensor = torch.stack(quantiles)
-            input = torch.clamp(input, min=quantiles_tensor[:, 0].min(), max=quantiles_tensor[:, 1].max())
-        if debug_info:
-            print(f"time for clipping {input.numel()} elements: {time.time() - time0}, computed quantiles: {quantiles_tensor[:, 0].min(), quantiles_tensor[:, 1].max()}")
-        
+        float_input = input.float()
+        if channel_wise:
+            input = torch.clamp(input, min=torch.quantile(float_input, 1-clip_threshold, dim=0, keepdim=True), max=torch.quantile(float_input, clip_threshold, dim=0, keepdim=True))
+        elif token_wise:
+            input = torch.clamp(input, min=torch.quantile(float_input, 1-clip_threshold, dim=1, keepdim=True), max=torch.quantile(float_input, clip_threshold, dim=1, keepdim=True))
+        else:
+            try:
+                input = torch.clamp(input, min=torch.quantile(float_input, 1-clip_threshold), max=torch.quantile(float_input, clip_threshold))
+            except RuntimeError:
+                # using chunk-wise quantile to deal with large tensor (element number > 16M)
+                if debug_info:
+                    print(f"Input tensor is too large, using chunk-wise quantile to compute clipping threshold.")
+                chunk_size = 1e7    # 10M
+                quantiles = []
+                for i in range(0, input.numel(), int(chunk_size)):
+                    chunk = float_input.view(-1)[i: i + int(chunk_size)]
+                    quantiles.append(torch.quantile(chunk, torch.tensor([1-clip_threshold, clip_threshold]).to(chunk.device)))
+                quantiles_tensor = torch.stack(quantiles)
+                input = torch.clamp(input, min=quantiles_tensor[:, 0].min(), max=quantiles_tensor[:, 1].max())
+                if debug_info:
+                    print(f"time for clipping {input.numel()} elements: {time.time() - time0}, computed quantiles: {quantiles_tensor[:, 0].min(), quantiles_tensor[:, 1].max()}")
+
+    # get amax
     if channel_wise:
-        # assert len(input.shape) == 2, f"Input tensor should be 2D, but got {len(input.shape)}D. For channel-wise quantization, please make sure the input activation is in @D shape (batchsize*seq_len, channel dim)."
-        assert (not token_wise), f"channel_wise and token_wise cannot be True at the same time."
-        if len(shape) != 2:
-            dim = shape[-1]
-            input = input.reshape(-1, dim)
         amax = input.abs().max(dim=0, keepdim=True)[0]      # channel-wise max value
         scale = torch.ones((1, 1), device=input.device)     # 2-D tensor shape
     elif token_wise:
-        assert (not channel_wise), f"channel_wise and token_wise cannot be True at the same time."
-        if len(shape) != 2:
-            dim = shape[-1]
-            input = input.reshape(-1, dim)
         amax = input.abs().max(dim=1, keepdim=True)[0]      # token-wise max value
         scale = torch.ones((1, 1), device=input.device)     # 2-D tensor shape
     else:
@@ -163,6 +174,7 @@ def _simu_cast_to_fp4(
         nearest_index = torch.argmin(diff_matrix, dim=0)
         return table[nearest_index].view(x.shape)
     
+    # look-up quantization
     if base4:
         TABLE = BASE_4_FP4_QUANTIZATION_TABLE if nan_existed else BASE_4_FP4_QUANTIZATION_TABLE_WIRHOUT_NAN
     else:
@@ -174,6 +186,7 @@ def _simu_cast_to_fp4(
         # result = result.to(torch.uint4)       # currently not supported
         print(f"result(in torch.uint-like style): {look_up_quantize(input * sf, TABLE[format])}")
     
+    # reshape back for channel-wise or token-wise quantization
     if (channel_wise or token_wise) and len(shape) != 2:
         result = result.view(shape[:-1] + (-1, ))
         
@@ -425,23 +438,24 @@ if __name__ == '__main__':
     # a = torch.randn(1, 1, 1, 3, 4, dtype=torch.float16).cuda() * 0.01
     # a = torch.tensor([[-0.1, 0.2, -0.3], [0.4, -0.5, 0.6], [-0.7, 0.8, -0.9]]).cuda()
     # a = torch.tensor([[-0.01, 0.48, -0.967], [1.623, -2.222, 2.467], [-2.874, 3.3699, -3.457]]).cuda()
-    a = torch.tensor([[0.001, 0.048, 0.0967], [0.1623, 0.2222, 0.2467], [0.2874, 0.33699, 0.3957]]).cuda()      # e2m1 format
+    # a = torch.tensor([[0.001, 0.048, 0.0967], [0.1623, 0.2222, 0.2467], [0.2874, 0.33699, 0.3957]]).cuda()      # e2m1 format
     a = torch.tensor([[0.001, 0.048, 0.0997], [0.1503, 0.2002, 0.2497], [0.2974, 0.30699, 0.4001]]).cuda()      # e2m1 format
     # a = torch.tensor([[0.001, 0.048, 0.0967], [0.1623, 0.2222, 0.2467], [0.2467, 0.2874, 0.2998]]).cuda()       # e1m2 format
-    # a = torch.tensor(
-    #     [ [ [-0.01,  0.48,   -9.67], 
-    #         [1.623,  -2.222, 24.67], ],
-    #       [ [-2.874, 3.699,  -34.57], 
-    #         [0.85,   -1.343, 18.88], ]
-    #     ]
-    # ).cuda()        # channel-wise outlier. shape: (2, 2, 3)
+    a = torch.tensor(
+        [ [ [-0.01,  0.48,   -9.67], 
+            [1.623,  -2.222, 24.67], ],
+          [ [-2.874, 3.699,  -34.57], 
+            [0.85,   -1.343, 18.88], ]
+        ]
+    ).cuda()        # channel-wise outlier. shape: (2, 2, 3)
 
     # data, meta = simu_cast_to_fp4_using_scaling_meta(a)
     # # b = ScalingTensor(data, meta)     # currently not supported, because te not support kFloat4
     # b = data * meta.scale_inv
     
-    if False:       # test channel-wise quantization or token-wise quantization
-        b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, channel_wise=True)
+    if True:       # test channel-wise quantization or token-wise quantization
+        # b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, channel_wise=True)
+        b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, token_wise=True, outlier_clip=True, clip_threshold=0.8)
         # b = _simu_cast_to_fp4(a.permute(0, 2, 1), format='e1m2', debug_info=True, token_wise=True).permute(0, 2, 1)
         c = b.cast(Dtypes.kfloat8_e4m3)
 
@@ -450,14 +464,24 @@ if __name__ == '__main__':
         print(f"Double casted tensor to fp8: {c}")
         print(f"ScaingTensor's data: {c.value - 128}")
     
-    else:   
-        # b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, nan_existed=False, base4=True)
-        b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, nan_existed=False, base4=True, outlier_clip=True, clip_threshold=0.97)
+    elif False:   
+        b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True)
+        # b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, outlier_clip=True, clip_threshold=0.97)
         # c = a.cast(Dtypes.kfloat8_e4m3)
-        d = b.cast(Dtypes.kfloat8_e5m2)
+        d = b.cast(Dtypes.kfloat8_e4m3)
         
         print(f"Original tensor: {a}, with max value: {a.abs().max()}")
         print(f"Simulated casted tensor to fp8: {b}, with max value: {b.abs().max()}")
         # print(f"MS-AMP casted tensor to fp8: {c}")
         # print(f"ScaingTensor's data: {c.value - 128}")
         print(f"Double casted tensor to fp8: {d}")
+        
+    else:
+        aa = (2000*a).cast(Dtypes.kfloat8_e4m3)
+        print(aa)
+        # fp_max = 4.0
+        # margin = 0
+        # for amax in range(5, 200, 5):
+        #     amax = torch.tensor(0.01 * amax).cuda()
+        #     sf = ScalingMeta.compute_scaling_factor(amax, torch.ones((), device='cuda'), fp_max, margin)
+        #     print(f"amax: {amax:.2f}, computed scaling factor: {sf}")
