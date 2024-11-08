@@ -8,6 +8,9 @@ import torch
 
 from msamp.common.dtype import Floating, Dtypes
 
+# import os
+# USE_FLOAT_SF=bool(int(os.getenv('USE_FLOAT_SF', 0)))
+# USE_PLAIN_INTEGER_SF=bool(int(os.getenv('USE_PLAIN_INTEGER_SF', 0)))
 
 class ScalingMeta:
     """The meta data for scaling tensor."""
@@ -48,11 +51,22 @@ class ScalingMeta:
         Returns:
             return new scaling tensor.
         """
-        exp = torch.floor(torch.log2(fp_max / amax)) - margin
+        # using floating pont method
+        if True:
+            sf = fp_max / amax
+            sf = torch.where(amax > 0.0, sf, scale)
+            sf = torch.where(torch.isfinite(amax), sf, scale)
+            return sf
+        
+        # using original 2-power method
+        if False:
+            exp = torch.log2(fp_max / amax) - margin    # 这里不对exp去整，算出来的sf不一定是2的幂次方，硬件上不能直接移位，但是可以保证f的精度更高
+        else:
+            exp = torch.floor(torch.log2(fp_max / amax)) - margin       # 按原来的方法，exp被取整舍入后，算出来的sf一定是一个2的幂次方
         sf = torch.round(torch.pow(2, torch.abs(exp)))
         sf = torch.where(amax > 0.0, sf, scale)
         sf = torch.where(torch.isfinite(amax), sf, scale)
-        sf = torch.where(exp < 0, 1 / sf, sf)
+        sf = torch.where(exp < 0, 1 / sf, sf)               # 这一步是因为上面求sf的时候，把exp取绝对值以保证sf能正常被torch.round，这里是为了把exp的正负号加回去
         return sf
 
     def is_warmup(self):
