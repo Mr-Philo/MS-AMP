@@ -24,13 +24,15 @@ USE_E1M2 = bool(int(os.getenv('USE_E1M2', 0)))
 USE_E2M1 = bool(int(os.getenv('USE_E2M1', 0)))
 USE_E3M0 = bool(int(os.getenv('USE_E3M0', 0)))
 
+DISABLE_TE_KERNEL = bool(int(os.getenv('DISABLE_TE_KERNEL', 0)))
+
 from msamp.nn.functional import _simu_cast_to_fp4
 
 class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
     """A linear function with FP8 support, grad accumulation and async communication."""
     @staticmethod
     @custom_fwd
-    def forward(ctx, input, weight, bias, gradient_accumulation_fusion, async_grad_allreduce, sequence_parallel, use_fp8_computation):
+    def forward(ctx, input, weight, bias, gradient_accumulation_fusion, async_grad_allreduce, sequence_parallel, permit_fp4_computation):
         """Forward pass.
 
         Args:
@@ -41,18 +43,24 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             gradient_accumulation_fusion (bool): Whether to fuse gradient accumulation.
             async_grad_allreduce (bool): Whether to use asynchronous all-reduce.
             sequence_parallel (bool): Whether to use sequence parallel.
-            use_fp8_computation (bool): Whether to use fp8 gemm function.
+            permit_fp4_computation (bool): Whether to permit simu fp4 gemm function. Note: to actually use fp4, USE_W_SIMU_FP4 or USE_A_SIMU_FP4 must be set to True.
 
         Returns:
             torch.Tensor: Output tensor.
         """
         
         #? this is for fp16 mix fp8 computation.
-        if not use_fp8_computation and False:         # use native fp32 computation. refer to megatron-dev/megatron/core/tensor_parallel/layers.py
-            ctx.use_fp8_computation = False         #! added. this is for specific weight(ScalingTensor) update in backward pass
+        if DISABLE_TE_KERNEL:         # use native fp32 computation. refer to megatron-dev/megatron/core/tensor_parallel/layers.py
+            ctx.disable_te_kernel = True         #! added. this is for specific weight(ScalingTensor) update in backward pass
             ctx.fp8_weight = weight                 #! added
             
             weight = weight.to(input.dtype)     #! added. see MS-AMP/msamp/common/tensor/tensor.py, Line 160
+            
+            if permit_fp4_computation and USE_W_SIMU_FP4:
+                weight = _simu_cast_to_fp4(weight, format='e2m1')
+            if permit_fp4_computation and USE_A_SIMU_FP4:
+                input = _simu_cast_to_fp4(input, format='e2m1', channel_wise=True)
+
             ctx.save_for_backward(input, weight)
             ctx.use_bias = bias is not None
             ctx.gradient_accumulation_fusion = gradient_accumulation_fusion
@@ -82,7 +90,7 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         ctx.gradient_accumulation_fusion = gradient_accumulation_fusion
         ctx.async_grad_allreduce = async_grad_allreduce
         ctx.sequence_parallel = sequence_parallel
-        ctx.use_fp8_computation = True
+        ctx.disable_te_kernel = False
 
         input_shape = input.shape
         ctx.input_shape = input_shape
@@ -95,12 +103,7 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         input = input.contiguous()
 
         #? this is for fp8 mix simu-fp4 computation.
-        use_fp4_computation = use_fp8_computation       # change name for better understanding
-            
-        if (not USE_W_SIMU_FP4) or (not use_fp4_computation):
-            weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
-            ctx.weight_fp8 = weight_fp8
-        else:
+        if permit_fp4_computation and USE_W_SIMU_FP4:
             if USE_E1M2:
                 format_str = 'e1m2'
             elif USE_E2M1:
@@ -109,26 +112,29 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
                 format_str = 'e3m0'
             else:
                 format_str = 'e2m1'     # default
-            fp4_weight_in_float = _simu_cast_to_fp4(weight.float(), format=format_str)
+            fp4_weight_in_float = _simu_cast_to_fp4(weight.float(), format=format_str, outlier_clip=True, clip_threshold=0.99, nan_existed=False)
             weight_fp8 = fp4_weight_in_float.cast(Dtypes.kfloat8_e4m3)
             if USE_W_BACKWARD_SIMU_FP4:
                 ctx.weight_fp8 = weight_fp8
             else:
                 ctx.weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
+        else:
+            weight_fp8 = weight.cast(Dtypes.kfloat8_e4m3)
+            ctx.weight_fp8 = weight_fp8
             
         old_meta_group = input_meta.group
         input_meta.group = tp_group
         
-        if (not USE_A_SIMU_FP4) or (not use_fp4_computation):
-            input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta, sync=sequence_parallel)
-            ctx.input_fp8 = input_fp8
-        else:
-            fp4_input = _simu_cast_to_fp4(input, format='e2m1', channel_wise=True)
+        if permit_fp4_computation and USE_A_SIMU_FP4:
+            fp4_input = _simu_cast_to_fp4(input, format='e2m1', outlier_clip=True, token_wise=True, clip_threshold=0.999, nan_existed=False)
             input_fp8 = fp4_input.cast(Dtypes.kfloat8_e4m3, meta=input_meta, sync=sequence_parallel)
             if USE_A_BACKWARD_SIMU_FP4:
                 ctx.input_fp8 = input_fp8
             else:
                 ctx.input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta, sync=sequence_parallel)
+        else:
+            input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta, sync=sequence_parallel)
+            ctx.input_fp8 = input_fp8
             
         input_meta.group = old_meta_group
 
@@ -177,7 +183,7 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             A tuple of gradients of the arguments.
         """
         
-        if not ctx.use_fp8_computation and False:         # temporary disable
+        if ctx.disable_te_kernel:         # temporary disable
             input, weight = ctx.saved_tensors
             use_bias = ctx.use_bias
 
