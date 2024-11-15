@@ -32,7 +32,7 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
     """A linear function with FP8 support, grad accumulation and async communication."""
     @staticmethod
     @custom_fwd
-    def forward(ctx, input, weight, bias, gradient_accumulation_fusion, async_grad_allreduce, sequence_parallel, permit_fp4_computation):
+    def forward(ctx, input, weight, bias, gradient_accumulation_fusion, async_grad_allreduce, sequence_parallel, fp4_quantize_scheme, permit_fp4_computation):
         """Forward pass.
 
         Args:
@@ -43,11 +43,37 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             gradient_accumulation_fusion (bool): Whether to fuse gradient accumulation.
             async_grad_allreduce (bool): Whether to use asynchronous all-reduce.
             sequence_parallel (bool): Whether to use sequence parallel.
+            fp4_quantize_scheme (str): Method to control the fp4 activation quantization scheme.
             permit_fp4_computation (bool): Whether to permit simu fp4 gemm function. Note: to actually use fp4, USE_W_SIMU_FP4 or USE_A_SIMU_FP4 must be set to True.
 
         Returns:
             torch.Tensor: Output tensor.
         """
+        
+        assert fp4_quantize_scheme in [
+            "e2m1_token_wise",
+            "e2m1_clip_0.99",
+            "e2m1_clip_0.999",      
+            "e2m1_mask_clip_0.999",     # for normal activation output + layernorm
+            "e2m1_clip_0.9995",
+            "e3m0_no_clip",             
+            "e3m0_clip_0.999",
+            "e2m2_sign_shift",
+            "e2m2_sign_shift_clip_0.999",          # for gelu output
+            "donot_quantize",           
+        ], f"Unsupported fp4_quantize_scheme: {fp4_quantize_scheme}"
+        
+        a_fp4_args = {
+            "e2m1_token_wise":  {"format": "e2m1", "token_wise": True, "outlier_clip": False, "nan_existed": False},
+            "e2m1_clip_0.99":   {"format": "e2m1", "token_wise": True, "outlier_clip": True, "clip_threshold": 0.99, "nan_existed": False},
+            "e2m1_clip_0.999":  {"format": "e2m1", "token_wise": True, "outlier_clip": True, "clip_threshold": 0.999, "nan_existed": False},
+            "e2m1_mask_clip_0.999": {"format": "e2m1", "token_wise": True, "outlier_clip": True, "clip_threshold": 0.999, "nan_existed": False, "use_masked_clip": True},
+            "e2m1_clip_0.9995": {"format": "e2m1", "token_wise": True, "outlier_clip": True, "clip_threshold": 0.9995, "nan_existed": False},
+            "e3m0_no_clip":     {"format": "e3m0", "token_wise": True, "outlier_clip": False, "nan_existed": False},
+            "e3m0_clip_0.999":  {"format": "e3m0", "token_wise": True, "outlier_clip": True, "clip_threshold": 0.999, "nan_existed": False},
+            "e2m2_sign_shift":  {"format": "e2m2", "token_wise": True, "outlier_clip": False, "sign_shift": True, "nan_existed": True},
+            "e2m2_sign_shift_clip_0.999":  {"format": "e2m2", "token_wise": True, "outlier_clip": True, "clip_threshold": 0.999, "sign_shift": True, "nan_existed": True},
+        }
         
         #? this is for fp16 mix fp8 computation.
         if DISABLE_TE_KERNEL:         # use native fp32 computation. refer to megatron-dev/megatron/core/tensor_parallel/layers.py
@@ -125,8 +151,8 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         old_meta_group = input_meta.group
         input_meta.group = tp_group
         
-        if permit_fp4_computation and USE_A_SIMU_FP4:
-            fp4_input = _simu_cast_to_fp4(input, format='e2m1', outlier_clip=True, token_wise=True, clip_threshold=0.999, nan_existed=False)
+        if permit_fp4_computation and USE_A_SIMU_FP4 and (fp4_quantize_scheme != 'donot_quantize'):
+            fp4_input = _simu_cast_to_fp4(input, **a_fp4_args[fp4_quantize_scheme])
             input_fp8 = fp4_input.cast(Dtypes.kfloat8_e4m3, meta=input_meta, sync=sequence_parallel)
             if USE_A_BACKWARD_SIMU_FP4:
                 ctx.input_fp8 = input_fp8
@@ -264,12 +290,12 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
 
             if ctx.sequence_parallel:
                 handle.wait()
-                return sub_grad_input, grad_weight, grad_bias, None, None, None, None
+                return sub_grad_input, grad_weight, grad_bias, None, None, None, None, None
 
             if ctx.async_grad_allreduce:
                 handle.wait()
 
-            return grad_input, grad_weight, grad_bias, None, None, None, None
+            return grad_input, grad_weight, grad_bias, None, None, None, None, None
     
         # fp8 logic
         input_fp8 = ctx.input_fp8
@@ -362,9 +388,9 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
 
         if ctx.sequence_parallel:
             handle.wait()
-            return sub_grad_input, grad_weight, grad_bias, None, None, None, None
+            return sub_grad_input, grad_weight, grad_bias, None, None, None, None, None
 
         if ctx.async_grad_allreduce:
             handle.wait()
 
-        return grad_input, grad_weight, grad_bias, None, None, None, None
+        return grad_input, grad_weight, grad_bias, None, None, None, None, None
