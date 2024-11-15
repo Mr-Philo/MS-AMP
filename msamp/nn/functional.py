@@ -28,6 +28,7 @@ FP4_QUANTIZATION_TABLE = {
     'e1m2': torch.tensor([-3.0, -2.5, -2.0, -1.5, -1.0, -0.5,  0.0, 0.5,  1.0, 1.5, 2.0, 2.5, 3.0]).view(-1, 1).cuda(),     # eqivalent to e0m3
     'e2m1': torch.tensor([-4.0, -3.0, -2.0, -1.5, -1.0, -0.5,  0.0, 0.5,  1.0, 1.5, 2.0, 3.0, 4.0]).view(-1, 1).cuda(),
     'e3m0': torch.tensor([-8.0, -4.0, -2.0, -1.0, -0.5, -0.25, 0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0]).view(-1, 1).cuda(),
+    'e2m2': torch.tensor([0.0,  0.25,  0.5, 0.75,  1.0, 1.25,  1.5, 1.75, 2.0,  2.5, 3.0, 3.5, 4.0, 5.0, 6.0]).view(-1, 1).cuda(),     # only positive
 }
 
 FP4_QUANTIZATION_TABLE_WIRHOUT_NAN = {
@@ -35,6 +36,7 @@ FP4_QUANTIZATION_TABLE_WIRHOUT_NAN = {
     'e1m2': torch.tensor([-3.5, -3.0, -2.5, -2.0, -1.5, -1.0, -0.5,  0.0, 0.5,  1.0, 1.5, 2.0, 2.5, 3.0, 3.5]).view(-1, 1).cuda(),     # eqivalent to e0m3
     'e2m1': torch.tensor([-6.0, -4.0, -3.0, -2.0, -1.5, -1.0, -0.5,  0.0, 0.5,  1.0, 1.5, 2.0, 3.0, 4.0, 6.0]).view(-1, 1).cuda(),
     'e3m0': torch.tensor([-16,  -8.0, -4.0, -2.0, -1.0, -0.5, -0.25, 0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16 ]).view(-1, 1).cuda(),
+    'e2m2': torch.tensor([0.0,  0.25,  0.5, 0.75,  1.0, 1.25,  1.5, 1.75, 2.0,  2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 7.0]).view(-1, 1).cuda(),     # only positive
 }
 
 BASE_4_FP4_QUANTIZATION_TABLE = {
@@ -53,6 +55,60 @@ BASE_4_FP4_QUANTIZATION_TABLE_WIRHOUT_NAN = {
 }
 
 
+def apply_clipping(input, clip_threshold, channel_wise=False, token_wise=False, use_mask=False, debug_info=False):
+    time0 = time.time() if debug_info else None
+    float_input = input.float() if input.dtype != torch.float32 else input
+    if channel_wise:
+        # 计算每个通道的上限和下限分位数
+        lower_bound = torch.quantile(float_input, 1 - clip_threshold, dim=0, keepdim=True)
+        upper_bound = torch.quantile(float_input, clip_threshold, dim=0, keepdim=True)
+        if use_mask:
+            # 使用掩码，将超出范围的元素置为0
+            input = torch.where((input >= lower_bound) & (input <= upper_bound), input, torch.tensor(0.0, device=input.device))
+        else:
+            # 使用 clamp 裁剪
+            input = torch.clamp(input, min=lower_bound, max=upper_bound)
+    
+    elif token_wise:
+        # 计算每个 token 的上限和下限分位数
+        lower_bound = torch.quantile(float_input, 1 - clip_threshold, dim=1, keepdim=True)
+        upper_bound = torch.quantile(float_input, clip_threshold, dim=1, keepdim=True)
+        if use_mask:
+            input = torch.where((input >= lower_bound) & (input <= upper_bound), input, torch.tensor(0.0, device=input.device))
+        else:
+            input = torch.clamp(input, min=lower_bound, max=upper_bound)
+
+    else:
+        try:
+            # 计算整个张量的上限和下限分位数
+            lower_bound = torch.quantile(float_input, 1 - clip_threshold)
+            upper_bound = torch.quantile(float_input, clip_threshold)
+            if use_mask:
+                input = torch.where((input >= lower_bound) & (input <= upper_bound), input, torch.tensor(0.0, device=input.device))
+            else:
+                input = torch.clamp(input, min=lower_bound, max=upper_bound)
+        except RuntimeError:
+            # 使用分块计算分位数以处理大张量
+            if debug_info:
+                print(f"Input tensor is too large, using chunk-wise quantile to compute clipping threshold.")
+            chunk_size = 1e7  # 10M
+            quantiles = []
+            for i in range(0, input.numel(), int(chunk_size)):
+                chunk = float_input.view(-1)[i: i + int(chunk_size)]
+                quantiles.append(torch.quantile(chunk, torch.tensor([1 - clip_threshold, clip_threshold]).to(chunk.device)))
+            quantiles_tensor = torch.stack(quantiles)
+            lower_bound = quantiles_tensor[:, 0].min()
+            upper_bound = quantiles_tensor[:, 1].max()
+            if use_mask:
+                input = torch.where((input >= lower_bound) & (input <= upper_bound), input, torch.tensor(0.0, device=input.device))
+            else:
+                input = torch.clamp(input, min=lower_bound, max=upper_bound)
+    if debug_info:
+        print(f"time for clipping {input.numel()} elements: {time.time() - time0}, computed quantiles: {lower_bound, upper_bound}")
+
+    return input
+
+
 def _simu_cast_to_fp4(
     input: torch.Tensor, 
     format: str = 'e1m2', 
@@ -66,7 +122,9 @@ def _simu_cast_to_fp4(
     use_fp8_sf: bool = False,
     base4: bool = False,
     outlier_clip: bool = False,
-    clip_threshold: float = 0.97
+    clip_threshold: float = 0.97,
+    use_masked_clip: bool = False,
+    sign_shift: bool = False,
 ) -> torch.Tensor:
     
     """Simulated casting pytorch tensor to fp4. Note: 
@@ -88,9 +146,9 @@ def _simu_cast_to_fp4(
     
     # pre-check for formats
     assert isinstance(input, torch.Tensor), f"Input tensor should be torch.Tensor, but got {type(input)}."
-    assert format in ['e0m3', 'e1m2', 'e2m1', 'e3m0'], f"Unsupported format: {format}. Please choose from ['e0m3', 'e1m2', 'e2m1', 'e3m0']."
+    assert format in ['e0m3', 'e1m2', 'e2m1', 'e3m0', 'e2m2'], f"Unsupported format: {format}. Please choose from ['e0m3', 'e1m2', 'e2m1', 'e3m0', 'e2m2']."
 
-    E, M = (0, 3) if format == 'e0m3' else (1, 2) if format == 'e1m2' else (2, 1) if format == 'e2m1' else (3, 0)
+    E, M = (0, 3) if format == 'e0m3' else (1, 2) if format == 'e1m2' else (2, 1) if format == 'e2m1' else (3, 0) if format == 'e3m0' else (2, 2)
     if int4_test:
         E, M = (0, 3)
     if fp8_test:
@@ -104,13 +162,16 @@ def _simu_cast_to_fp4(
     if (channel_wise or token_wise) and len(shape) != 2:
         dim = shape[-1]
         input = input.reshape(-1, dim)
-    
-    # asymmetric quantization    
-    if asymmetric:
-        zeropoint = (input.min() + input.max()) / 2
-        input = input - zeropoint
+        
+    # sign shift. currently only support positive
+    if sign_shift:
+        shift = input.min()
+        input = input - shift         # shift to positive, and min value to zero
         
     # outlier clipping
+    if outlier_clip:
+        input = apply_clipping(input, clip_threshold, channel_wise, token_wise, use_masked_clip, debug_info)
+    '''
     if outlier_clip:
         time0 = time.time() if debug_info else None
         float_input = input.float()
@@ -134,7 +195,14 @@ def _simu_cast_to_fp4(
                 input = torch.clamp(input, min=quantiles_tensor[:, 0].min(), max=quantiles_tensor[:, 1].max())
                 if debug_info:
                     print(f"time for clipping {input.numel()} elements: {time.time() - time0}, computed quantiles: {quantiles_tensor[:, 0].min(), quantiles_tensor[:, 1].max()}")
+    '''
 
+    # asymmetric quantization    
+    if asymmetric:
+        zeropoint = (input.min() + input.max()) / 2
+        input = input - zeropoint
+        
+        
     # get amax
     if channel_wise:
         amax = input.abs().max(dim=0, keepdim=True)[0]      # channel-wise max value
@@ -192,7 +260,8 @@ def _simu_cast_to_fp4(
         
     if asymmetric:
         result = result + zeropoint
-        
+    if sign_shift:
+        result = result + shift
     return result
 
 
@@ -441,19 +510,19 @@ if __name__ == '__main__':
     # a = torch.tensor([[0.001, 0.048, 0.0967], [0.1623, 0.2222, 0.2467], [0.2874, 0.33699, 0.3957]]).cuda()      # e2m1 format
     a = torch.tensor([[0.001, 0.048, 0.0997], [0.1503, 0.2002, 0.2497], [0.2974, 0.30699, 0.4001]]).cuda()      # e2m1 format
     # a = torch.tensor([[0.001, 0.048, 0.0967], [0.1623, 0.2222, 0.2467], [0.2467, 0.2874, 0.2998]]).cuda()       # e1m2 format
-    a = torch.tensor(
-        [ [ [-0.01,  0.48,   -9.67], 
-            [1.623,  -2.222, 24.67], ],
-          [ [-2.874, 3.699,  -34.57], 
-            [0.85,   -1.343, 18.88], ]
-        ]
-    ).cuda()        # channel-wise outlier. shape: (2, 2, 3)
+    # a = torch.tensor(
+    #     [ [ [-0.01,  0.48,   -9.67], 
+    #         [1.623,  -2.222, 24.67], ],
+    #       [ [-2.874, 3.699,  -34.57], 
+    #         [0.85,   -1.343, 18.88], ]
+    #     ]
+    # ).cuda()        # channel-wise outlier. shape: (2, 2, 3)
 
     # data, meta = simu_cast_to_fp4_using_scaling_meta(a)
     # # b = ScalingTensor(data, meta)     # currently not supported, because te not support kFloat4
     # b = data * meta.scale_inv
     
-    if True:       # test channel-wise quantization or token-wise quantization
+    if False:       # test channel-wise quantization or token-wise quantization
         # b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, channel_wise=True)
         b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, token_wise=True, outlier_clip=True, clip_threshold=0.8)
         # b = _simu_cast_to_fp4(a.permute(0, 2, 1), format='e1m2', debug_info=True, token_wise=True).permute(0, 2, 1)
@@ -464,9 +533,9 @@ if __name__ == '__main__':
         print(f"Double casted tensor to fp8: {c}")
         print(f"ScaingTensor's data: {c.value - 128}")
     
-    elif False:   
-        b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True)
-        # b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, outlier_clip=True, clip_threshold=0.97)
+    elif True:   
+        # b = _simu_cast_to_fp4(a, format='e3m0', debug_info=True)
+        b = _simu_cast_to_fp4(a, format='e2m2', debug_info=True, outlier_clip=False, clip_threshold=0.97, nan_existed=True)
         # c = a.cast(Dtypes.kfloat8_e4m3)
         d = b.cast(Dtypes.kfloat8_e4m3)
         
