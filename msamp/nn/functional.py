@@ -14,6 +14,10 @@ from msamp.nn.parameter import ScalingParameter
 
 import os
 import time
+import numpy as np
+from typing import Literal
+from sklearn.ensemble import IsolationForest
+
 
 USE_W_SIMU_FP4 = bool(int(os.getenv('USE_W_SIMU_FP4', 0)))
 USE_A_SIMU_FP4 = bool(int(os.getenv('USE_A_SIMU_FP4', 0)))
@@ -34,7 +38,7 @@ FP4_QUANTIZATION_TABLE = {
 FP4_QUANTIZATION_TABLE_WIRHOUT_NAN = {
     'e0m3': torch.tensor([-7.0, -6.0, -5.0, -4.0, -3.0, -2.0, -1.0,  0.0, 1.0,  2.0, 3.0, 4.0, 5.0, 6.0, 7.0]).view(-1, 1).cuda(),
     'e1m2': torch.tensor([-3.5, -3.0, -2.5, -2.0, -1.5, -1.0, -0.5,  0.0, 0.5,  1.0, 1.5, 2.0, 2.5, 3.0, 3.5]).view(-1, 1).cuda(),     # eqivalent to e0m3
-    'e2m1': torch.tensor([-6.0, -4.0, -3.0, -2.0, -1.5, -1.0, -0.5,  0.0, 0.5,  1.0, 1.5, 2.0, 3.0, 4.0, 6.0]).view(-1, 1).cuda(),
+    'e2m1': torch.tensor([-6.0, -4.0, -3.0, -2.0, -1.5, -1.0, -0.5,  0.0, 0.5,  1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.bfloat16).view(-1, 1).cuda(),
     'e3m0': torch.tensor([-16,  -8.0, -4.0, -2.0, -1.0, -0.5, -0.25, 0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16 ]).view(-1, 1).cuda(),
     'e2m2': torch.tensor([0.0,  0.25,  0.5, 0.75,  1.0, 1.25,  1.5, 1.75, 2.0,  2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 7.0]).view(-1, 1).cuda(),     # only positive
 }
@@ -55,7 +59,39 @@ BASE_4_FP4_QUANTIZATION_TABLE_WIRHOUT_NAN = {
 }
 
 
-def apply_clipping(input, clip_threshold, channel_wise=False, token_wise=False, use_mask=False, debug_info=False):
+def apply_iForest_outlier_clipping(input, use_mask=False, debug_info=False, return_residual=False):
+    time0 = time.time() if debug_info else None
+    
+    # 使用孤立森林检测异常值
+    clf = IsolationForest(
+        contamination=0.001, 
+        n_jobs=-1,              # use all available CPUs
+        random_state=42         # for reproducibility
+    )
+    input_reshaped = input.float().flatten().cpu().numpy().reshape(-1, 1)
+    outlier_labels = clf.fit_predict(input_reshaped)
+    
+    print(f"[iForest] detected {sum(outlier_labels == -1)} outliers in {input.numel()} elements.")
+    #  if debug_info else None
+    outlier_indices = np.where(outlier_labels == -1)[0]
+    weights_filtered = np.delete(input_reshaped, outlier_indices, axis=0)
+    
+    lower_bound = weights_filtered.min()
+    upper_bound = weights_filtered.max()
+    if use_mask:
+        output = torch.where((input >= lower_bound) & (input <= upper_bound), input, torch.tensor(0.0, device=input.device))
+    else:
+        output = torch.clamp(input, min=lower_bound, max=upper_bound)
+    print(f"[iForest] clipping range: {lower_bound, upper_bound}") if debug_info else None
+    print(f"[iForest] time for clipping {input.numel()} elements: {time.time() - time0}") if debug_info else None
+    
+    if return_residual:
+        return output, input - output
+    else:
+        return output, None
+    
+    
+def apply_quantile_clipping(input, clip_threshold, channel_wise=False, token_wise=False, use_mask=False, debug_info=False, return_residual=False):
     time0 = time.time() if debug_info else None
     float_input = input.float() if input.dtype != torch.float32 else input
     if channel_wise:
@@ -64,29 +100,25 @@ def apply_clipping(input, clip_threshold, channel_wise=False, token_wise=False, 
         upper_bound = torch.quantile(float_input, clip_threshold, dim=0, keepdim=True)
         if use_mask:
             # 使用掩码，将超出范围的元素置为0
-            input = torch.where((input >= lower_bound) & (input <= upper_bound), input, torch.tensor(0.0, device=input.device))
+            output = torch.where((input >= lower_bound) & (input <= upper_bound), input, torch.tensor(0.0, device=input.device))
         else:
             # 使用 clamp 裁剪
-            input = torch.clamp(input, min=lower_bound, max=upper_bound)
+            output = torch.clamp(input, min=lower_bound, max=upper_bound)
     
     elif token_wise:
         # 计算每个 token 的上限和下限分位数
         lower_bound = torch.quantile(float_input, 1 - clip_threshold, dim=1, keepdim=True)
         upper_bound = torch.quantile(float_input, clip_threshold, dim=1, keepdim=True)
         if use_mask:
-            input = torch.where((input >= lower_bound) & (input <= upper_bound), input, torch.tensor(0.0, device=input.device))
+            output = torch.where((input >= lower_bound) & (input <= upper_bound), input, torch.tensor(0.0, device=input.device))
         else:
-            input = torch.clamp(input, min=lower_bound, max=upper_bound)
+            output = torch.clamp(input, min=lower_bound, max=upper_bound)
 
     else:
         try:
             # 计算整个张量的上限和下限分位数
             lower_bound = torch.quantile(float_input, 1 - clip_threshold)
             upper_bound = torch.quantile(float_input, clip_threshold)
-            if use_mask:
-                input = torch.where((input >= lower_bound) & (input <= upper_bound), input, torch.tensor(0.0, device=input.device))
-            else:
-                input = torch.clamp(input, min=lower_bound, max=upper_bound)
         except RuntimeError:
             # 使用分块计算分位数以处理大张量
             if debug_info:
@@ -99,19 +131,23 @@ def apply_clipping(input, clip_threshold, channel_wise=False, token_wise=False, 
             quantiles_tensor = torch.stack(quantiles)
             lower_bound = quantiles_tensor[:, 0].min()
             upper_bound = quantiles_tensor[:, 1].max()
-            if use_mask:
-                input = torch.where((input >= lower_bound) & (input <= upper_bound), input, torch.tensor(0.0, device=input.device))
-            else:
-                input = torch.clamp(input, min=lower_bound, max=upper_bound)
+        if use_mask:
+            output = torch.where((input >= lower_bound) & (input <= upper_bound), input, torch.tensor(0.0, device=input.device))
+        else:
+            output = torch.clamp(input, min=lower_bound, max=upper_bound)
     if debug_info:
         print(f"time for clipping {input.numel()} elements: {time.time() - time0}, computed quantiles: {lower_bound, upper_bound}")
 
-    return input
+    if return_residual:
+        return output, input - output
+    else:
+        return output, None
 
 
 def _simu_cast_to_fp4(
     input: torch.Tensor, 
-    format: str = 'e1m2', 
+    format: Literal['e0m3', 'e1m2', 'e2m1', 'e3m0', 'e2m2'] = 'e2m1',
+    quantize_method: Literal['rtn', 'stochastic'] = 'rtn',
     debug_info: bool = False, 
     nan_existed: bool = True, 
     asymmetric: bool = False,
@@ -122,9 +158,15 @@ def _simu_cast_to_fp4(
     use_fp8_sf: bool = False,
     base4: bool = False,
     outlier_clip: bool = False,
+    clip_method: Literal['iForest', 'quantile'] = 'quantile',
     clip_threshold: float = 0.97,
     use_masked_clip: bool = False,
+    apply_vector_clip: bool = True,
     sign_shift: bool = False,
+    residual_compensation: bool = False,
+    return_residual: bool = False,
+    direct_return_after_clip: bool = False,
+    return_scaled_input_for_bwd: bool = False,
 ) -> torch.Tensor:
     
     """Simulated casting pytorch tensor to fp4. Note: 
@@ -170,32 +212,22 @@ def _simu_cast_to_fp4(
         
     # outlier clipping
     if outlier_clip:
-        input = apply_clipping(input, clip_threshold, channel_wise, token_wise, use_masked_clip, debug_info)
-    '''
-    if outlier_clip:
-        time0 = time.time() if debug_info else None
-        float_input = input.float()
-        if channel_wise:
-            input = torch.clamp(input, min=torch.quantile(float_input, 1-clip_threshold, dim=0, keepdim=True), max=torch.quantile(float_input, clip_threshold, dim=0, keepdim=True))
-        elif token_wise:
-            input = torch.clamp(input, min=torch.quantile(float_input, 1-clip_threshold, dim=1, keepdim=True), max=torch.quantile(float_input, clip_threshold, dim=1, keepdim=True))
-        else:
-            try:
-                input = torch.clamp(input, min=torch.quantile(float_input, 1-clip_threshold), max=torch.quantile(float_input, clip_threshold))
-            except RuntimeError:
-                # using chunk-wise quantile to deal with large tensor (element number > 16M)
-                if debug_info:
-                    print(f"Input tensor is too large, using chunk-wise quantile to compute clipping threshold.")
-                chunk_size = 1e7    # 10M
-                quantiles = []
-                for i in range(0, input.numel(), int(chunk_size)):
-                    chunk = float_input.view(-1)[i: i + int(chunk_size)]
-                    quantiles.append(torch.quantile(chunk, torch.tensor([1-clip_threshold, clip_threshold]).to(chunk.device)))
-                quantiles_tensor = torch.stack(quantiles)
-                input = torch.clamp(input, min=quantiles_tensor[:, 0].min(), max=quantiles_tensor[:, 1].max())
-                if debug_info:
-                    print(f"time for clipping {input.numel()} elements: {time.time() - time0}, computed quantiles: {quantiles_tensor[:, 0].min(), quantiles_tensor[:, 1].max()}")
-    '''
+        if clip_method == 'iForest':
+            input, residual = apply_iForest_outlier_clipping(input, use_mask=use_masked_clip, debug_info=debug_info, return_residual=(return_residual or residual_compensation))
+        elif clip_method == 'quantile':
+            # use quantile clipping
+            if apply_vector_clip:
+                channel_wise_clip, token_wise_clip = channel_wise, token_wise
+            else:
+                channel_wise_clip, token_wise_clip = False, False
+            input, residual = apply_quantile_clipping(input, clip_threshold, channel_wise_clip, token_wise_clip, use_masked_clip, debug_info, return_residual=(return_residual or residual_compensation))
+    
+    if direct_return_after_clip:
+        if (channel_wise or token_wise) and len(shape) != 2:
+            result = result.view(shape[:-1] + (-1, ))
+        if sign_shift:
+            result = result + shift
+        return input
 
     # asymmetric quantization    
     if asymmetric:
@@ -214,8 +246,13 @@ def _simu_cast_to_fp4(
         amax = input.abs().max()
         scale = torch.ones((), device=input.device)
     
-    # fp_max = Floating._get_fp_max(E, M, inf_existed=False, nan_existed=nan_existed) if not int4_test else 6.0
-    fp_max = 6.0 if E == 0 else 8.0 if M == 0 else Floating._get_fp_max(E, M, inf_existed=False, nan_existed=nan_existed)
+    # handle fp_max when E=0 or M=0
+    if E == 0:
+        fp_max = 6.0 if nan_existed else 7.0
+    elif M == 0:
+        fp_max = 8.0 if nan_existed else 16.0
+    else:
+        fp_max = Floating._get_fp_max(E, M, inf_existed=False, nan_existed=nan_existed)
     margin = 0
     sf = ScalingMeta.compute_scaling_factor(amax, scale, fp_max, margin)
     if use_fp8_sf:
@@ -238,30 +275,94 @@ def _simu_cast_to_fp4(
             table = table.to(x.device)
         if table.dtype != x.dtype:
             table = table.to(x.dtype)
-        diff_matrix = torch.abs(x.view(1, -1) - table)
-        nearest_index = torch.argmin(diff_matrix, dim=0)
-        return table[nearest_index].view(x.shape)
+            
+        if True:       #! matrix operation    O(M*N), M: len(input), N: len(table)
+            diff_matrix = torch.abs(x.view(1, -1) - table)
+            nearest_index = torch.argmin(diff_matrix, dim=0)
+            return table[nearest_index].view(x.shape)
+        else:           #! binary search       O(M*logN), M: len(input), N: len(table)
+            table = table.view(-1)      # TODO: 确定使用随机量化后，原table直接使用一维tensor即可
+            indices = torch.searchsorted(table, x, right=True)
+            indices = torch.clamp(indices, 1, len(table) - 1)  # Ensure valid range
+            left_values = table[indices - 1]
+            right_values = table[indices]
+            left_closer = (torch.abs(x - left_values) <= torch.abs(x - right_values))
+            nearest_values = torch.where(left_closer, left_values, right_values)
+            return nearest_values.view(x.shape)
+    
+    def stochastic_quantize(x: torch.Tensor, table: torch.Tensor) -> torch.Tensor:
+        '''
+        'table' tensor should be a 2-D column tensor. if not, using .view(-1, 1) to convert.
+        'table' tensor should be on the same device with 'x'. Default to cuda.
+        '''
+        if len(table.shape) != 2 or table.shape[1] != 1:
+            table = table.view(-1, 1)
+        if table.device != x.device:
+            table = table.to(x.device)
+        if table.dtype != x.dtype:
+            table = table.to(x.dtype)
+        
+        table = table.view(-1)      # TODO: 确定使用随机量化后，原table直接使用一维tensor即可
+        # 二分查找，返回右侧的索引 / Binary search: compute nearest indices for each element in x
+        indices = torch.searchsorted(table, x, right=True)
+        
+        # Clamp indices to valid range
+        indices = torch.clamp(indices, 1, len(table) - 1) 
+        left_values = table[indices - 1]
+        right_values = table[indices]
+        
+        # Compute distances to the two nearest points
+        left_diff = torch.abs(x - left_values)
+        right_diff = torch.abs(x - right_values)
+        total_diff = left_diff + right_diff
+        
+        # Compute probabilities for stochastic rounding
+        probs = right_diff / total_diff  # Probability of choosing left
+        random_vals = torch.rand_like(probs)  # Generate random numbers in [0, 1]
+        
+        # Stochastic rounding decision
+        quantized_values = torch.where(random_vals < probs, left_values, right_values)
+        
+        return quantized_values.view(x.shape)
     
     # look-up quantization
     if base4:
+        raise NotImplementedError("Do not use base4 quantization")
         TABLE = BASE_4_FP4_QUANTIZATION_TABLE if nan_existed else BASE_4_FP4_QUANTIZATION_TABLE_WIRHOUT_NAN
     else:
         TABLE = FP4_QUANTIZATION_TABLE if nan_existed else FP4_QUANTIZATION_TABLE_WIRHOUT_NAN
-    result = look_up_quantize(input * sf, TABLE[format]).div(sf)
+        
+    quantize_func = look_up_quantize if quantize_method == 'rtn' else stochastic_quantize
+    scaled_input = input * sf       # this * operation can handle matrix-tensor broadcasting. For example, (3, 4) * (4,) -> (3, 4)
+    result = quantize_func(scaled_input, TABLE[format]).div(sf)        # this .div() method can also handle matrix-tensor broadcasting
+    if residual_compensation:
+        result = result + residual
     result.requires_grad = input.requires_grad
     
     if debug_info:
         # result = result.to(torch.uint4)       # currently not supported
-        print(f"result(in torch.uint-like style): {look_up_quantize(input * sf, TABLE[format])}")
+        print(f"result(in torch.uint-like style): {quantize_func(scaled_input, TABLE[format])}")
+        # 统计每个数出现了多少次
+        print(f"unique values and their counts: {torch.unique(quantize_func(scaled_input, TABLE[format]).float(), return_counts=True)}")
     
     # reshape back for channel-wise or token-wise quantization
     if (channel_wise or token_wise) and len(shape) != 2:
         result = result.view(shape[:-1] + (-1, ))
+        if return_residual:
+            residual = residual.view(shape[:-1] + (-1, ))
+        if return_scaled_input_for_bwd:
+            scaled_input = scaled_input.view(shape[:-1] + (-1, ))
         
     if asymmetric:
         result = result + zeropoint
     if sign_shift:
         result = result + shift
+       
+    assert not (return_scaled_input_for_bwd and return_residual), f"return_scaled_input_for_bwd and return_residual cannot be True at the same time." 
+    if return_residual:
+        return result, residual
+    elif return_scaled_input_for_bwd:
+        return result, scaled_input
     return result
 
 
@@ -296,6 +397,74 @@ def _simu_cast_to_fp4_qualcomm(
     result = result * scales
     result.requires_grad = input.requires_grad
     return result
+
+
+@torch.no_grad()
+def _differentiable_quantize_derivative(x: torch.Tensor, k=5, level_format='e2m1', nan_existed=False, using_scaled_k=True, use_tanh=False, power_clamp_max=3.0):
+    
+    def _tanh_differentiable_quantize_derivative_single_step(x, delta, k):
+        sech_squred = 1 / torch.cosh(k * (x - delta / 2))**2
+        return (delta * k * sech_squred) / (2 * torch.tanh(k * delta / 2))
+    
+    def _power_differentiable_quantize_derivative_single_step(x, delta, k):
+        return torch.clamp(torch.abs(2 * x / delta - 1) ** (1 / k - 1) / k, max=power_clamp_max) 
+
+    levels = FP4_QUANTIZATION_TABLE[level_format].flatten() if nan_existed else FP4_QUANTIZATION_TABLE_WIRHOUT_NAN[level_format].flatten()
+    levels = levels.to(x.device)
+    levels = levels.to(x.dtype)
+    dy = torch.zeros_like(x)
+    for i in range(len(levels) - 1):
+        # Determine the interval and delta
+        left = levels[i]
+        right = levels[i + 1]
+        delta = right - left
+        # Apply smooth quantization for this interval
+        mask = (x >= left) & (x < right)  # Mask for this interval
+        if use_tanh:
+            if using_scaled_k:
+                k_d = k / delta     #! Scaled k by delta
+            else:
+                k_d = k
+            dy[mask] = _tanh_differentiable_quantize_derivative_single_step(x[mask] - left, delta, k_d)
+        else:
+            dy[mask] = _power_differentiable_quantize_derivative_single_step(x[mask] - left, delta, k)
+    return dy
+
+
+@torch.no_grad()
+def _advanced_differentiable_quantize_derivative(x, k=25, level_format='e2m1', nan_existed=False, ste_smooth_alpha=0.0):
+    '''
+    update 1203
+    for speed up, we use matrix operation to compute the derivative for all intervals.
+    and we add a control parameter 'ste_smooth_alpha' to control the smoothness of the derivative.
+    '''
+    
+    levels = FP4_QUANTIZATION_TABLE[level_format].flatten() if nan_existed else FP4_QUANTIZATION_TABLE_WIRHOUT_NAN[level_format].flatten()
+    levels = levels.to(x.device).to(x.dtype)
+    
+    # Compute delta for all intervals
+    deltas = levels[1:] - levels[:-1]
+    
+    # Broadcast x to all intervals
+    x_expanded = x.unsqueeze(-1)    # Shape: (n, 1) if x is 1D tensor
+    levels_left = levels[:-1].unsqueeze(0)  # Shape: (1, m-1)
+    levels_right = levels[1:].unsqueeze(0)  # Shape: (1, m-1)
+    
+    # Mask for all intervals
+    mask = (x_expanded >= levels_left) & (x_expanded < levels_right)  # Shape: (n, m-1)
+    
+    # compute differentiable quantize derivative for all intervals
+    delta_expanded = deltas.unsqueeze(0)  # Shape: (1, m-1)
+    shifted_x = x_expanded - levels_left  # Shape: (n, m-1), shifting x to [0, delta]
+    
+    sech_squred = 1 / torch.cosh(k * (shifted_x - delta_expanded / 2))**2
+    # derivatives = (1 - ste_smooth_alpha) * (delta_expanded * k * sech_squred) / (2 * torch.tanh(k * delta_expanded / 2)) + ste_smooth_alpha * torch.ones_like(shifted_x)
+    derivatives = (delta_expanded * k * sech_squred) / (2 * torch.tanh(k * delta_expanded / 2))
+    
+    # Combine results using the mask
+    dy = torch.sum(derivatives * mask, dim=-1)  # Summing over all intervals
+    return dy
+    
 
 class _FP8GemmFunction(torch.autograd.Function):
     """A function provides fp8 gemm forward and backward computations."""
@@ -501,7 +670,52 @@ class FunctionalOverider:
 FunctionalOverider.override()
 
 
+def test_sparsified_compensation():
+    
+    original_tensor = torch.randn(1000, 2000, dtype=torch.bfloat16).cuda() * 0.01
+    fp4_tensor, residual = _simu_cast_to_fp4(original_tensor, format='e2m1', debug_info=True, residual_compensation=False, outlier_clip=True, clip_threshold=0.8, return_residual=True)
+    # residual should be sparse
+    print(f"Residual sparsity: {residual.to_sparse()._values().numel() / residual.numel()}")
+    compensated_tensor = fp4_tensor + residual
+    
+    # before compensation
+    cos_similarity = torch.nn.functional.cosine_similarity(original_tensor.view(-1), fp4_tensor.view(-1), dim=0)
+    snr = 10 * torch.log10((original_tensor.norm() / (original_tensor - fp4_tensor).norm())**2)
+    print(f"Before compensation, cosine similarity: {cos_similarity}, SNR: {snr}")
+    # after compensation
+    cos_similarity = torch.nn.functional.cosine_similarity(original_tensor.view(-1), compensated_tensor.view(-1), dim=0)
+    snr = 10 * torch.log10((original_tensor.norm() / (original_tensor - compensated_tensor).norm())**2)
+    print(f"After compensation, cosine similarity: {cos_similarity}, SNR: {snr}")
+    
+    # valid matrix multiplication
+    k = 50000
+    weight = torch.randn(2000, 1000, dtype=torch.bfloat16).cuda() * 0.01
+    start_time = time.time()
+    for i in range(k):
+        output = torch.matmul(original_tensor, weight)
+    end_time = time.time()
+    print(f"Average time for original matrix multiplication: {(end_time - start_time) / k}")
+    
+    sparse_residual = residual.to_sparse()
+    start_time = time.time()
+    #! sparse matrix multiplication must be in fp32
+    sparse_residual = sparse_residual.to(torch.float32)
+    weight = weight.to(torch.float32)
+    for i in range(k):
+        res_output = torch.matmul(sparse_residual, weight)
+    end_time = time.time()
+    print(f"Average time for sparse matrix multiplication: {(end_time - start_time) / k}")
+    
+    true_out = torch.matmul(fp4_tensor, weight.to(fp4_tensor.dtype)) + res_output.to(residual.dtype)
+    # true_out = torch.matmul(fp4_tensor, weight) + torch.matmul(residual, weight)
+    compensated_out = torch.matmul(compensated_tensor, weight.to(fp4_tensor.dtype))
+    print(f"Compare compensated output with true output, diff level: {(true_out - compensated_out).abs().mean()}, true output value level: {true_out.abs().mean()}")
+    print(f"Compare original output with true output, diff level: {(output - true_out).abs().mean()}, true output value level: {output.abs().mean()}")
+    
 if __name__ == '__main__':
+    
+    # test_sparsified_compensation()
+    # exit()
     
     a = torch.randn(3, 4, dtype=torch.float16).cuda() * 0.01
     # a = torch.randn(1, 1, 1, 3, 4, dtype=torch.float16).cuda() * 0.01
@@ -517,14 +731,27 @@ if __name__ == '__main__':
     #         [0.85,   -1.343, 18.88], ]
     #     ]
     # ).cuda()        # channel-wise outlier. shape: (2, 2, 3)
+    # a = torch.tensor([
+    #     [0.1, 0.2, 5.0],
+    #     [-0.1, 0.15, -10.0],
+    #     [0.0, 0.25, 0.3],
+    #     [0.15, -0.2, 0.25],
+    # ]).cuda()
+    # a = torch.tensor([
+    #     [0.1, 0.2, 0.0],
+    #     [-0.1, 0.15, 0.0],
+    #     [0.0, 0.25, 0.3],
+    #     [0.15, -0.2, 0.25],
+    # ]).cuda()       # no outlier
+    # a = torch.randn(2048, 8096, dtype=torch.bfloat16).cuda() * 0.01     # 模拟1.3B模型的nlp层参数，用于测速
 
     # data, meta = simu_cast_to_fp4_using_scaling_meta(a)
     # # b = ScalingTensor(data, meta)     # currently not supported, because te not support kFloat4
     # b = data * meta.scale_inv
     
     if False:       # test channel-wise quantization or token-wise quantization
-        # b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, channel_wise=True)
-        b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, token_wise=True, outlier_clip=True, clip_threshold=0.8)
+        b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, channel_wise=True)
+        # b = _simu_cast_to_fp4(a, format='e1m2', debug_info=True, token_wise=True, outlier_clip=True, clip_threshold=0.8, nan_existed=True)
         # b = _simu_cast_to_fp4(a.permute(0, 2, 1), format='e1m2', debug_info=True, token_wise=True).permute(0, 2, 1)
         c = b.cast(Dtypes.kfloat8_e4m3)
 
@@ -534,8 +761,8 @@ if __name__ == '__main__':
         print(f"ScaingTensor's data: {c.value - 128}")
     
     elif True:   
-        # b = _simu_cast_to_fp4(a, format='e3m0', debug_info=True)
-        b = _simu_cast_to_fp4(a, format='e2m2', debug_info=True, outlier_clip=False, clip_threshold=0.97, nan_existed=True)
+        b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, quantize_method='rtn')
+        # b = _simu_cast_to_fp4(a, format='e2m2', debug_info=True, outlier_clip=False, clip_threshold=0.97, nan_existed=True)
         # c = a.cast(Dtypes.kfloat8_e4m3)
         d = b.cast(Dtypes.kfloat8_e4m3)
         
@@ -544,6 +771,20 @@ if __name__ == '__main__':
         # print(f"MS-AMP casted tensor to fp8: {c}")
         # print(f"ScaingTensor's data: {c.value - 128}")
         print(f"Double casted tensor to fp8: {d}")
+        
+    elif False:
+        # test residual
+        large_tensor = torch.randn(1000, 1000, dtype=torch.float16).cuda() * 0.01
+        # large_tensor = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=torch.float16).cuda()
+        fp4_large_tensor, residual = _simu_cast_to_fp4(large_tensor, format='e2m1', debug_info=True, residual_compensation=True, outlier_clip=True, clip_threshold=0.98)
+        # 检查residual张量的形状和稀疏性
+        print(f"Original tensor: {large_tensor.shape}, with max value: {large_tensor.abs().max()}")
+        print(f"fp4 tensor: {fp4_large_tensor.shape}, with max value: {fp4_large_tensor.abs().max()}")
+        print(f"Residual tensor: {residual.shape}, with max value: {residual.abs().max()}")
+        print(f"Residual tensor's sparsity: {torch.sum(residual == 0).item() / residual.numel()}")
+        
+        # test residual + sparse matrix multiplication
+        # residual_sparse 
         
     else:
         aa = (2000*a).cast(Dtypes.kfloat8_e4m3)
