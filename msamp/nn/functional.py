@@ -276,12 +276,12 @@ def _simu_cast_to_fp4(
         if table.dtype != x.dtype:
             table = table.to(x.dtype)
             
-        if True:       #! matrix operation    O(M*N), M: len(input), N: len(table)
+        if False:       #! matrix operation    O(M*N), M: len(input), N: len(table); memory: O(M*N)
             diff_matrix = torch.abs(x.view(1, -1) - table)
             nearest_index = torch.argmin(diff_matrix, dim=0)
             return table[nearest_index].view(x.shape)
-        else:           #! binary search       O(M*logN), M: len(input), N: len(table)
-            table = table.view(-1)      # TODO: 确定使用随机量化后，原table直接使用一维tensor即可
+        else:           #! binary search       O(M*logN), M: len(input), N: len(table); memory: O(M)
+            table = table.view(-1)      # TODO: 二分查找方法下，原table直接使用一维tensor即可
             indices = torch.searchsorted(table, x, right=True)
             indices = torch.clamp(indices, 1, len(table) - 1)  # Ensure valid range
             left_values = table[indices - 1]
@@ -724,13 +724,13 @@ if __name__ == '__main__':
     # a = torch.tensor([[0.001, 0.048, 0.0967], [0.1623, 0.2222, 0.2467], [0.2874, 0.33699, 0.3957]]).cuda()      # e2m1 format
     a = torch.tensor([[0.001, 0.048, 0.0997], [0.1503, 0.2002, 0.2497], [0.2974, 0.30699, 0.4001]]).cuda()      # e2m1 format
     # a = torch.tensor([[0.001, 0.048, 0.0967], [0.1623, 0.2222, 0.2467], [0.2467, 0.2874, 0.2998]]).cuda()       # e1m2 format
-    # a = torch.tensor(
-    #     [ [ [-0.01,  0.48,   -9.67], 
-    #         [1.623,  -2.222, 24.67], ],
-    #       [ [-2.874, 3.699,  -34.57], 
-    #         [0.85,   -1.343, 18.88], ]
-    #     ]
-    # ).cuda()        # channel-wise outlier. shape: (2, 2, 3)
+    a = torch.tensor(
+        [ [ [-0.01,  0.48,   -9.67], 
+            [1.623,  -2.222, 24.67], ],
+          [ [-2.874, 3.699,  -34.57], 
+            [0.85,   -1.343, 18.88], ]
+        ]
+    ).cuda()        # channel-wise outlier. shape: (2, 2, 3)
     # a = torch.tensor([
     #     [0.1, 0.2, 5.0],
     #     [-0.1, 0.15, -10.0],
@@ -749,8 +749,8 @@ if __name__ == '__main__':
     # # b = ScalingTensor(data, meta)     # currently not supported, because te not support kFloat4
     # b = data * meta.scale_inv
     
-    if False:       # test channel-wise quantization or token-wise quantization
-        b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, channel_wise=True)
+    if True:       # test channel-wise quantization or token-wise quantization
+        b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, channel_wise=True, nan_existed=False)
         # b = _simu_cast_to_fp4(a, format='e1m2', debug_info=True, token_wise=True, outlier_clip=True, clip_threshold=0.8, nan_existed=True)
         # b = _simu_cast_to_fp4(a.permute(0, 2, 1), format='e1m2', debug_info=True, token_wise=True).permute(0, 2, 1)
         c = b.cast(Dtypes.kfloat8_e4m3)
@@ -761,7 +761,7 @@ if __name__ == '__main__':
         print(f"ScaingTensor's data: {c.value - 128}")
     
     elif True:   
-        b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, quantize_method='rtn')
+        b = _simu_cast_to_fp4(a, format='e2m1', debug_info=True, quantize_method='rtn', nan_existed=False)
         # b = _simu_cast_to_fp4(a, format='e2m2', debug_info=True, outlier_clip=False, clip_threshold=0.97, nan_existed=True)
         # c = a.cast(Dtypes.kfloat8_e4m3)
         d = b.cast(Dtypes.kfloat8_e4m3)

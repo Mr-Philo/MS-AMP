@@ -27,11 +27,15 @@ USE_E3M0 = bool(int(os.getenv('USE_E3M0', 0)))
 DISABLE_TE_KERNEL = bool(int(os.getenv('DISABLE_TE_KERNEL', 0)))
 
 USE_W_GEMM_COMPENSATION = bool(int(os.getenv('USE_W_GEMM_COMPENSATION', 0)))
-USE_DIFFERENTIABLE_GRADIENT_ESTIMATOR = bool(int(os.getenv('USE_DIFFERENTIABLE_GRADIENT_ESTIMATOR', 0)))
+USE_W_DIFFERENTIABLE_GRADIENT_ESTIMATOR = bool(int(os.getenv('USE_W_DIFFERENTIABLE_GRADIENT_ESTIMATOR', 0)))
+USE_A_DIFFERENTIABLE_GRADIENT_ESTIMATOR = bool(int(os.getenv('USE_A_DIFFERENTIABLE_GRADIENT_ESTIMATOR', 0)))
 USE_TMP_PARAM_ONE= bool(int(os.getenv('USE_TMP_PARAM_ONE', 0)))
 USE_TMP_PARAM_TWO= bool(int(os.getenv('USE_TMP_PARAM_TWO', 0)))
 
-from msamp.nn.functional import _simu_cast_to_fp4, _differentiable_quantize_derivative, _advanced_differentiable_quantize_derivative
+# from msamp.nn.functional import _simu_cast_to_fp4, _differentiable_quantize_derivative, _advanced_differentiable_quantize_derivative
+from msamp.operators.fp4_quant import FP4_QUANT
+_simu_cast_to_fp4 = FP4_QUANT.quantize_simu_fp4_in_bf16
+_differentiable_quantize_derivative = FP4_QUANT.apply_DGE_item
 from megatron import get_fp4_blend_factor
 
 class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
@@ -58,6 +62,7 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         
         assert fp4_quantize_scheme in [
             "e1m2_clip_0.97_compensation",
+            "e1m2_clip_0.99_compensation",
             "e1m2_clip_0.97_compensation_gemm",
             "e2m1_token_wise",
             "e2m1_clip_0.99",
@@ -73,6 +78,7 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         
         a_fp4_args = {
             "e1m2_clip_0.97_compensation": {"format": "e1m2", "token_wise": True, "outlier_clip": True, "clip_threshold": 0.97, "nan_existed": False, "residual_compensation": True},
+            "e1m2_clip_0.99_compensation": {"format": "e1m2", "token_wise": True, "outlier_clip": True, "clip_threshold": 0.99, "nan_existed": False, "residual_compensation": True},
             "e1m2_clip_0.97_compensation_gemm": {"format": "e1m2", "token_wise": True, "outlier_clip": True, "clip_threshold": 0.97, "nan_existed": False, "residual_compensation": False, "return_residual": True},
             "e2m1_token_wise":  {"format": "e2m1", "token_wise": True, "outlier_clip": False, "nan_existed": False},
             "e2m1_clip_0.99":   {"format": "e2m1", "token_wise": True, "outlier_clip": True, "clip_threshold": 0.99, "nan_existed": False},
@@ -140,31 +146,23 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
 
         #? this is for fp8 mix simu-fp4 computation.
         if permit_fp4_computation and USE_W_SIMU_FP4:
-            if USE_E1M2:
-                format_str = 'e1m2'
-            elif USE_E2M1:
-                format_str = 'e2m1'
-            elif USE_E3M0:
-                format_str = 'e3m0'
-            else:
-                format_str = 'e2m1'     # default
-                
             if USE_W_GEMM_COMPENSATION:
-                fp4_weight_in_float, weight_residual = _simu_cast_to_fp4(weight.float(), format=format_str, channel_wise=True, outlier_clip=True, clip_threshold=0.95, nan_existed=False, residual_compensation=False, return_residual=True)
-            elif USE_DIFFERENTIABLE_GRADIENT_ESTIMATOR:
-                fp4_weight_in_float, scaled_w = _simu_cast_to_fp4(weight.float(), format=format_str, nan_existed=False, channel_wise=True, return_scaled_input_for_bwd=True)
+                raise NotImplementedError("Not recommended to use different quantize compensation scheme for backward yet.")
+                fp4_weight_in_float, weight_residual = _simu_cast_to_fp4(weight.bfloat16(), format='e2m1', channel_wise=True, outlier_clip=True, clip_threshold=0.95, nan_existed=False, residual_compensation=False, return_residual=True)
+            elif USE_W_DIFFERENTIABLE_GRADIENT_ESTIMATOR:
+                fp4_weight_in_float, scaled_w = _simu_cast_to_fp4(weight.bfloat16(), format='e2m1', nan_existed=False, channel_wise=True, return_scaled_input_for_bwd=True)
             else:
-                # fp4_weight_in_float = _simu_cast_to_fp4(weight.float(), format=format_str, channel_wise=True, outlier_clip=True, clip_threshold=0.95, nan_existed=False, residual_compensation=True, return_residual=False)
-                fp4_weight_in_float = _simu_cast_to_fp4(weight.float(), format=format_str, nan_existed=False, channel_wise=True)
+                fp4_weight_in_float = _simu_cast_to_fp4(weight.bfloat16(), format='e2m1', nan_existed=False, channel_wise=True)
             
             weight_fp8 = fp4_weight_in_float.cast(Dtypes.kfloat8_e4m3)
             if USE_W_BACKWARD_SIMU_FP4:
                 if USE_W_GEMM_COMPENSATION:
+                    raise NotImplementedError("Not recommended to use different quantize compensation scheme for backward yet.")
                     ctx.weight_fp8 = (fp4_weight_in_float + weight_residual).cast(Dtypes.kfloat8_e4m3)
                     # 反向计算梯度时，需要传入正确的加了补偿的weight，而不是fp4_weight_in_float
                 else:
                     ctx.weight_fp8 = weight_fp8
-                if USE_DIFFERENTIABLE_GRADIENT_ESTIMATOR:
+                if USE_W_DIFFERENTIABLE_GRADIENT_ESTIMATOR:
                     ctx.save_for_backward(scaled_w)
             else:
                 # using mix high+low
@@ -183,6 +181,8 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             
             if fp4_quantize_scheme.endswith('gemm'):
                 fp4_input, a_residual = _simu_cast_to_fp4(input, **a_fp4_args[fp4_quantize_scheme])
+            elif USE_A_DIFFERENTIABLE_GRADIENT_ESTIMATOR:
+                fp4_input, scaled_a = _simu_cast_to_fp4(input, **a_fp4_args[fp4_quantize_scheme], return_scaled_input_for_bwd=True)
             else:
                 fp4_input = _simu_cast_to_fp4(input, **a_fp4_args[fp4_quantize_scheme])
                 
@@ -195,6 +195,8 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
                     ctx.input_fp8 = (fp4_input + a_residual).cast(Dtypes.kfloat8_e4m3, meta=input_meta, sync=sequence_parallel)
                 else:
                     ctx.input_fp8 = input_fp8
+                if USE_A_DIFFERENTIABLE_GRADIENT_ESTIMATOR:
+                    ctx.save_for_backward(scaled_a)
             else:
                 ctx.input_fp8 = input.cast(Dtypes.kfloat8_e4m3, meta=input_meta, sync=sequence_parallel)
         else:
@@ -388,6 +390,10 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         weight_fp8_t = weight_fp8.fp8_transpose()
         grad_input = Gemm.fp8_gemm(weight_fp8_t, grad_output_fp8, output_qtype, use_split_accumulator=True)
         grad_input = grad_input.view(ctx.dim_size)
+        if USE_A_DIFFERENTIABLE_GRADIENT_ESTIMATOR and USE_A_SIMU_FP4:
+            scaled_a = ctx.saved_tensors[0]
+            assert scaled_a is not None
+            grad_input.mul_(_differentiable_quantize_derivative(scaled_a, k=3, level_format='e2m1', nan_existed=False))
 
         if ctx.sequence_parallel:
             handle.wait()
@@ -426,7 +432,7 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             use_split_accumulator=True,
         )
         # todo: adopt differentiable gradient estimation if set USE_DIFFERENTIABLE_GRADIENT_ESTIMATOR=1
-        if USE_DIFFERENTIABLE_GRADIENT_ESTIMATOR:
+        if USE_W_DIFFERENTIABLE_GRADIENT_ESTIMATOR and USE_W_SIMU_FP4:
             scaled_w = ctx.saved_tensors[0]
             assert scaled_w is not None
             
@@ -435,7 +441,8 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             
             # grad_weight.mul_((_differentiable_quantize_derivative(scaled_w, k=10, level_format='e2m1', nan_existed=False) + torch.ones_like(scaled_w))/2)
             # grad_weight.mul_((_differentiable_quantize_derivative(scaled_w, k=k, level_format='e2m1', nan_existed=False, using_scaled_k=True) + torch.ones_like(scaled_w))/2)
-            grad_weight.mul_(_differentiable_quantize_derivative(scaled_w, k=3, level_format='e2m1', nan_existed=False))
+            grad_weight.mul_(_differentiable_quantize_derivative(scaled_w, k=3.0, power_clamp_max=3.0))
+            # grad_weight.mul_(torch.rand_like(scaled_w))
             
             # grad_weight.mul_(_advanced_differentiable_quantize_derivative(scaled_w, k=5, level_format='e2m1', nan_existed=False, ste_smooth_alpha=0.5))
             # if USE_TMP_PARAM_ONE:
