@@ -58,7 +58,7 @@ void quantize_bf16(at::Tensor input, at::Tensor output, int size) {
     __nv_bfloat16* output_data = reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()); 
     
     // 配置线程和块
-    const int threadsPerBlock = HIP_GET_NUM_THREADS(size);
+    const int threadsPerBlock = HIP_GET_NUM_THREADS(size);              // 512
     // const int blocks = HIP_GET_BLOCKS(size, threadsPerBlock);        // 该函数规定了最大grid num为HIP_MAX_GRID_NUM = 65535，在处理很大的size时会出现问题
     const int blocks = (size + threadsPerBlock - 1) / threadsPerBlock;
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -131,8 +131,9 @@ void launch_differentiable_quantize_derivative(
     __nv_bfloat16* output_data = reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()); 
     
     // 配置线程和块
-    const int threadsPerBlock = HIP_GET_NUM_THREADS(size);
-    const int blocks = HIP_GET_BLOCKS(size, threadsPerBlock);
+    const int threadsPerBlock = HIP_GET_NUM_THREADS(size);              // 512
+    // const int blocks = HIP_GET_BLOCKS(size, threadsPerBlock);        // 该函数规定了最大grid num为HIP_MAX_GRID_NUM = 65535，在处理很大的size时会出现问题
+    const int blocks = (size + threadsPerBlock - 1) / threadsPerBlock;
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
     differentiable_quantize_derivative<<<blocks, threadsPerBlock, 0, stream>>>(

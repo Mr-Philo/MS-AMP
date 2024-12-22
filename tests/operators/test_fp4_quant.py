@@ -24,6 +24,7 @@ class FP4QuantTestCase(unittest.TestCase):
         # total_points = 1000
         total_points = 655360
         x_values = torch.linspace(-6.0, 6.0, total_points).to(torch.bfloat16).cuda()
+        x_values = torch.randn(8192, 8192*4, dtype=torch.bfloat16).cuda()
         
         print(f"start benchmark")
         for i in range(15):
@@ -123,4 +124,38 @@ class FP4QuantTestCase(unittest.TestCase):
         # channel-wise或token-wise下，只有90%左右元素相近（还不是相等），可能是由于cuda版本代码直接用bf16去计算了amax和scaling factor
         
     # python -m unittest tests.operators.test_fp4_quant.FP4QuantTestCase.speed_bench_test
+    
+    @decorator.cuda_test
+    def test_unite_DGE(self):
         
+        from msamp.nn.functional import _simu_cast_to_fp4
+        import time
+        
+        input_tensor = torch.randn(8192, 8192*4, dtype=torch.bfloat16).cuda()
+        print(f"start benchmark")
+        for i in range(15):
+            if i == 5:
+                time0 = time.time()     # warmup
+            #! TODO:
+            output_tensor_cuda, scaled_w_cuda = FP4_QUANT.quantize_simu_fp4_in_bf16(input_tensor, format='e2m1', nan_existed=False, channel_wise=True, return_scaled_input_for_bwd=True)
+        print(f"cuda time: {time.time()-time0}")
+        for i in range(15):
+            if i == 5:
+                time0 = time.time()     # warmup
+            #! TODO:
+            output_tensor_py, scaled_w_py = _simu_cast_to_fp4(input_tensor, format='e2m1', nan_existed=False, channel_wise=True, return_scaled_input_for_bwd=True)
+        print(f"py time: {time.time()-time0}")
+        
+        print(scaled_w_cuda)
+        print(scaled_w_py)
+        eq_ratio = torch.sum(torch.isclose(scaled_w_cuda.float(), scaled_w_py.float(), atol=1e-6)).item() / scaled_w_cuda.numel()
+        print(f"eq ratio of scaled_w: {eq_ratio}")
+        print(f"cos simlarity of scaled_w: {torch.nn.functional.cosine_similarity(scaled_w_cuda.view(-1), scaled_w_py.view(-1), dim=0)}")
+        
+        from msamp.nn.functional import _differentiable_quantize_derivative
+        dge_cuda = FP4_QUANT.apply_DGE_item(scaled_w_cuda, k=3.0, power_clamp_max=3.0)
+        dge_py = _differentiable_quantize_derivative(scaled_w_py, k=3.0, power_clamp_max=3.0, level_format='e2m1', nan_existed=False)
+        eq_ratio = torch.sum(torch.isclose(dge_cuda.float(), dge_py.float(), atol=1e-6)).item() / dge_cuda.numel()
+        print(f"eq ratio of dge result: {eq_ratio}")
+        print(f"cos simlarity of dge result: {torch.nn.functional.cosine_similarity(dge_cuda.view(-1), dge_py.view(-1), dim=0)}")
+    # python -m unittest tests.operators.test_fp4_quant.FP4QuantTestCase.test_unite_DGE
