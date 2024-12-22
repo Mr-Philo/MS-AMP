@@ -59,7 +59,8 @@ void quantize_bf16(at::Tensor input, at::Tensor output, int size) {
     
     // 配置线程和块
     const int threadsPerBlock = HIP_GET_NUM_THREADS(size);
-    const int blocks = HIP_GET_BLOCKS(size, threadsPerBlock);
+    // const int blocks = HIP_GET_BLOCKS(size, threadsPerBlock);        // 该函数规定了最大grid num为HIP_MAX_GRID_NUM = 65535，在处理很大的size时会出现问题
+    const int blocks = (size + threadsPerBlock - 1) / threadsPerBlock;
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
     // 调用核函数

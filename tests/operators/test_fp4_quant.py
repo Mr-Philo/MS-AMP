@@ -21,7 +21,8 @@ class FP4QuantTestCase(unittest.TestCase):
         from msamp.nn.functional import _differentiable_quantize_derivative
         import time
         
-        total_points = 1000
+        # total_points = 1000
+        total_points = 655360
         x_values = torch.linspace(-6.0, 6.0, total_points).to(torch.bfloat16).cuda()
         
         print(f"start benchmark")
@@ -60,7 +61,7 @@ class FP4QuantTestCase(unittest.TestCase):
     def simple_check(self):
         '''Check the quantization of input tensor.'''
         input_tensor = torch.tensor([[[0.001, 0.048, 0.0997], [0.1503, 0.2002, 0.2497], [0.2974, 0.30699, 0.4001]]], dtype=torch.bfloat16).cuda()
-        output_tensor = FP4_QUANT.quantize_simu_fp4_in_bf16(input_tensor, debug_info=True)
+        output_tensor = FP4_QUANT.quantize_simu_fp4_in_bf16(input_tensor, format='e2m1', nan_existed=False, debug_info=True)
         
         print(f"tensor wise quantization")
         print(f"input_tensor: {input_tensor}")
@@ -72,7 +73,7 @@ class FP4QuantTestCase(unittest.TestCase):
               [ [-2.874, 3.699,  -34.57], 
                 [0.85,   -1.343, 18.88], ]
             ], dtype=torch.bfloat16).cuda()        # channel-wise outlier. shape: (2, 2, 3)
-        output_tensor = FP4_QUANT.quantize_simu_fp4_in_bf16(input_tensor, channel_wise=True, debug_info=True)
+        output_tensor = FP4_QUANT.quantize_simu_fp4_in_bf16(input_tensor, format='e2m1', nan_existed=False, channel_wise=True, debug_info=True)
         # output_tensor = FP4_QUANT.quantize_simu_fp4_in_bf16(input_tensor, channel_wise=True, debug_info=True, outlier_clip=True, clip_threshold=0.5)
         
         print(f"channel wise quantization")
@@ -88,6 +89,7 @@ class FP4QuantTestCase(unittest.TestCase):
         
         input_size = 8192
         input_tensor = torch.randn(8192, 8192*4, dtype=torch.bfloat16).cuda()
+        # input_tensor = torch.randn(16, 6554, dtype=torch.bfloat16).cuda()
         
         # warmup
         print(f"start benchmark")
@@ -95,19 +97,26 @@ class FP4QuantTestCase(unittest.TestCase):
             if i == 5:
                 time0 = time.time()     # warmup
             #! TODO:
-            # output_tensor_cuda = FP4_QUANT.quantize_simu_fp4_in_bf16(input_tensor, format='e1m2', channel_wise=True)   # w
+            # output_tensor_cuda = FP4_QUANT.quantize_simu_fp4_in_bf16(input_tensor, format='e1m2', nan_existed=False, channel_wise=True)
+            # output_tensor_cuda = FP4_QUANT.quantize_simu_fp4_in_bf16(input_tensor, format='e2m1', nan_existed=False, channel_wise=True)   # w
             output_tensor_cuda = FP4_QUANT.quantize_simu_fp4_in_bf16(input_tensor, outlier_clip=True, token_wise=True, residual_compensation=True)  # a
         print(f"cuda time: {time.time()-time0}")
         for i in range(15):
             if i == 5:
                 time0 = time.time()     # warmup
             #! TODO:
-            # output_tensor_py = _simu_cast_to_fp4(input_tensor, format='e1m2', nan_existed=False, channel_wise=True) # w
+            # output_tensor_py =  _simu_cast_to_fp4(input_tensor, format='e1m2', nan_existed=False, channel_wise=True)
+            # output_tensor_py = _simu_cast_to_fp4(input_tensor, format='e2m1', nan_existed=False, channel_wise=True) # w
             output_tensor_py = _simu_cast_to_fp4(input_tensor, format='e2m1', nan_existed=False, outlier_clip=True, token_wise=True, residual_compensation=True)    # a
         print(f"py time: {time.time()-time0}")
         
-        eq_ratio = torch.sum(torch.isclose(output_tensor_cuda.float(), output_tensor_py, atol=1e-3)).item() / output_tensor_cuda.numel()
+        print("CUDA out dtype: ", output_tensor_cuda.dtype)
+        print("Python out dtype: ", output_tensor_py.dtype)
+        eq_ratio = torch.sum(torch.isclose(output_tensor_cuda.float(), output_tensor_py.float(), atol=1e-3)).item() / output_tensor_cuda.numel()
         print(f"eq ratio: {eq_ratio}")
+        
+        print(f"SNR of cuda output: {10 * torch.log10(torch.mean((input_tensor.float())**2 ) / torch.mean((input_tensor.float() - output_tensor_cuda.float())**2 ))}")
+        print(f"SNR of python output: {10 * torch.log10(torch.mean((input_tensor.float())**2 ) / torch.mean((input_tensor.float() - output_tensor_py.float())**2 ))}")
 
         # 很奇怪的是allclose会报错，但是打印出来的两个tensor基本上是一样的，可能是因为二分查找和直接硬查找在边界处理方式不一样，所以可能有一些数值被一种方法被归到左端点，而被另一种方法归到右端点
         # tensor-wise下有99%的元素都相等
