@@ -22,15 +22,15 @@ class FP4QuantTestCase(unittest.TestCase):
         import time
         
         # total_points = 1000
-        total_points = 655360
-        x_values = torch.linspace(-6.0, 6.0, total_points).to(torch.bfloat16).cuda()
+        # total_points = 655360
+        # x_values = torch.linspace(-6.0, 6.0, total_points).to(torch.bfloat16).cuda()
         x_values = torch.randn(8192, 8192*4, dtype=torch.bfloat16).cuda()
         
         print(f"start benchmark")
         for i in range(15):
             if i == 5:
                 time0 = time.time()    # warmup
-            differentiable_quantized_y_derivative = FP4_QUANT.apply_DGE_item(x_values, k=3.0, power_clamp_max=3.0)
+            differentiable_quantized_y_derivative = FP4_QUANT.apply_DGE_item(x_values)
         print(f"cuda time: {time.time()-time0}")
         for i in range(15):
             if i == 5:
@@ -75,7 +75,7 @@ class FP4QuantTestCase(unittest.TestCase):
                 [0.85,   -1.343, 18.88], ]
             ], dtype=torch.bfloat16).cuda()        # channel-wise outlier. shape: (2, 2, 3)
         output_tensor = FP4_QUANT.quantize_simu_fp4_in_bf16(input_tensor, format='e2m1', nan_existed=False, channel_wise=True, debug_info=True)
-        # output_tensor = FP4_QUANT.quantize_simu_fp4_in_bf16(input_tensor, channel_wise=True, debug_info=True, outlier_clip=True, clip_threshold=0.5)
+        # output_tensor = FP4_QUANT.quantize_simu_fp4_in_bf16(input_tensor, token_wise=True, debug_info=True, outlier_clip=True, clip_threshold=0.5)
         
         print(f"channel wise quantization")
         print(f"input_tensor: {input_tensor}")
@@ -153,7 +153,7 @@ class FP4QuantTestCase(unittest.TestCase):
         print(f"cos simlarity of scaled_w: {torch.nn.functional.cosine_similarity(scaled_w_cuda.view(-1), scaled_w_py.view(-1), dim=0)}")
         
         from msamp.nn.functional import _differentiable_quantize_derivative
-        dge_cuda = FP4_QUANT.apply_DGE_item(scaled_w_cuda, k=3.0, power_clamp_max=3.0)
+        dge_cuda = FP4_QUANT.apply_DGE_item(scaled_w_cuda)
         dge_py = _differentiable_quantize_derivative(scaled_w_py, k=3.0, power_clamp_max=3.0, level_format='e2m1', nan_existed=False)
         eq_ratio = torch.sum(torch.isclose(dge_cuda.float(), dge_py.float(), atol=1e-6)).item() / dge_cuda.numel()
         print(f"eq ratio of dge result: {eq_ratio}")

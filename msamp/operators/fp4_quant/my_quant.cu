@@ -71,16 +71,27 @@ void quantize_bf16(at::Tensor input, at::Tensor output, int size) {
 }
 
 // 可微幂近似函数的导数
-__device__ float power_derivative(float x, float delta, float k, float power_clamp_max) {
+__device__ float power_derivative(float x, float delta) {
     float abs_term = fabsf(2.0f * x / delta - 1.0f);
-    return fminf(powf(abs_term, 1.0f / k - 1.0f) / k, power_clamp_max);
+    return fminf(powf(abs_term, - 0.6666667f) / 3.0f, 3.0f);
+}
+
+__device__ float power_derivative_delta2(float x){
+    return fminf(powf(fabsf(x - 1.0f), - 0.6666667f) / 3.0f, 3.0f);
+}
+
+__device__ float power_derivative_delta1(float x){
+    return fminf(powf(fabsf(2.0f * x - 1.0f), - 0.6666667f) / 3.0f, 3.0f);
+}
+
+__device__ float power_derivative_delta05(float x){
+    return fminf(powf(fabsf(4.0f * x - 1.0f), - 0.6666667f) / 3.0f, 3.0f);
 }
 
 // 计算可微幂近似函数的导数的CUDA核函数
 // 量化区间固定为[-6.0, -4.0, -3.0, -2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]，即E2M1_no_NaN
 __global__ void differentiable_quantize_derivative(
-    const __nv_bfloat16* input, __nv_bfloat16* output, 
-    float k, float power_clamp_max, int n
+    const __nv_bfloat16* input, __nv_bfloat16* output, int n
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
@@ -89,34 +100,34 @@ __global__ void differentiable_quantize_derivative(
     float dy = 0.0f;
 
     // 硬编码区间索引匹配
-    if (x >= -6.0f && x < -4.0f) {
-        dy = power_derivative(x + 6.0f, 2.0f, k, power_clamp_max);
-    } else if (x >= -4.0f && x < -3.0f) {
-        dy = power_derivative(x + 4.0f, 1.0f, k, power_clamp_max);
-    } else if (x >= -3.0f && x < -2.0f) {
-        dy = power_derivative(x + 3.0f, 1.0f, k, power_clamp_max);
-    } else if (x >= -2.0f && x < -1.5f) {
-        dy = power_derivative(x + 2.0f, 0.5f, k, power_clamp_max);
-    } else if (x >= -1.5f && x < -1.0f) {
-        dy = power_derivative(x + 1.5f, 0.5f, k, power_clamp_max);
-    } else if (x >= -1.0f && x < -0.5f) {
-        dy = power_derivative(x + 1.0f, 0.5f, k, power_clamp_max);
-    } else if (x >= -0.5f && x < 0.0f) {
-        dy = power_derivative(x + 0.5f, 0.5f, k, power_clamp_max);
-    } else if (x >= 0.0f && x < 0.5f) {
-        dy = power_derivative(x, 0.5f, k, power_clamp_max);
-    } else if (x >= 0.5f && x < 1.0f) {
-        dy = power_derivative(x - 0.5f, 0.5f, k, power_clamp_max);
-    } else if (x >= 1.0f && x < 1.5f) {
-        dy = power_derivative(x - 1.0f, 0.5f, k, power_clamp_max);
-    } else if (x >= 1.5f && x < 2.0f) {
-        dy = power_derivative(x - 1.5f, 0.5f, k, power_clamp_max);
-    } else if (x >= 2.0f && x < 3.0f) {
-        dy = power_derivative(x - 2.0f, 1.0f, k, power_clamp_max);
-    } else if (x >= 3.0f && x < 4.0f) {
-        dy = power_derivative(x - 3.0f, 1.0f, k, power_clamp_max);
-    } else if (x >= 4.0f && x <= 6.0f) {
-        dy = power_derivative(x - 4.0f, 2.0f, k, power_clamp_max);
+    if (x < -4.0f) {
+        dy = power_derivative_delta2(x + 6.0f);
+    } else if ( x < -3.0f) {
+        dy = power_derivative_delta1(x + 4.0f);
+    } else if ( x < -2.0f) {
+        dy = power_derivative_delta1(x + 3.0f);
+    } else if ( x < -1.5f) {
+        dy = power_derivative_delta05(x + 2.0f);
+    } else if ( x < -1.0f) {
+        dy = power_derivative_delta05(x + 1.5f);
+    } else if ( x < -0.5f) {
+        dy = power_derivative_delta05(x + 1.0f);
+    } else if ( x < 0.0f) {
+        dy = power_derivative_delta05(x + 0.5f);
+    } else if ( x < 0.5f) {
+        dy = power_derivative_delta05(x);
+    } else if ( x < 1.0f) {
+        dy = power_derivative_delta05(x - 0.5f);
+    } else if ( x < 1.5f) {
+        dy = power_derivative_delta05(x - 1.0f);
+    } else if ( x < 2.0f) {
+        dy = power_derivative_delta05(x - 1.5f);
+    } else if ( x < 3.0f) {
+        dy = power_derivative_delta1(x - 2.0f);
+    } else if ( x < 4.0f) {
+        dy = power_derivative_delta1(x - 3.0f);
+    } else {
+        dy = power_derivative_delta2(x - 4.0f);
     }
 
     output[idx] = __float2bfloat16(dy);
@@ -124,8 +135,7 @@ __global__ void differentiable_quantize_derivative(
 
 // 可微幂近似函数的导数主机接口函数
 void launch_differentiable_quantize_derivative(
-    at::Tensor input, at::Tensor output,
-    float k, float power_clamp_max, int size
+    at::Tensor input, at::Tensor output, int size
 ) {
     const __nv_bfloat16* input_data = reinterpret_cast<const __nv_bfloat16*>(input.data_ptr<at::BFloat16>());  
     __nv_bfloat16* output_data = reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()); 
@@ -136,9 +146,7 @@ void launch_differentiable_quantize_derivative(
     const int blocks = (size + threadsPerBlock - 1) / threadsPerBlock;
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-    differentiable_quantize_derivative<<<blocks, threadsPerBlock, 0, stream>>>(
-        input_data, output_data, k, power_clamp_max, size
-    );
+    differentiable_quantize_derivative<<<blocks, threadsPerBlock, 0, stream>>>(input_data, output_data, size);
     // cudaDeviceSynchronize();
 }
 

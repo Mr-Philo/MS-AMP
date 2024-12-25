@@ -14,6 +14,7 @@ from msamp.common.tensor import ScalingTensor
 from msamp.operators.gemm import Gemm
 
 import os
+import time
 USE_W_SIMU_FP4 = bool(int(os.getenv('USE_W_SIMU_FP4', 0)))
 USE_A_SIMU_FP4 = bool(int(os.getenv('USE_A_SIMU_FP4', 0)))
 USE_W_BACKWARD_SIMU_FP4 = bool(int(os.getenv('USE_W_BACKWARD_SIMU_FP4', USE_W_SIMU_FP4)))      # default same to W forward
@@ -438,10 +439,16 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             
             # k = 10
             # k = get_fp4_blend_factor()
-            
+
             # grad_weight.mul_((_differentiable_quantize_derivative(scaled_w, k=10, level_format='e2m1', nan_existed=False) + torch.ones_like(scaled_w))/2)
             # grad_weight.mul_((_differentiable_quantize_derivative(scaled_w, k=k, level_format='e2m1', nan_existed=False, using_scaled_k=True) + torch.ones_like(scaled_w))/2)
-            grad_weight.mul_(_differentiable_quantize_derivative(scaled_w, k=3.0, power_clamp_max=3.0))
+            # time0 = time.time()
+            # grad_weight.mul_(torch.randn(size=scaled_w.size(), device=scaled_w.device, dtype=torch.float32))
+            grad_weight.mul_(_differentiable_quantize_derivative(scaled_w))
+            # print(f"python side time: {time.time()-time0}")
+            # start = time.perf_counter()
+            # while time.perf_counter() - start < 2e-4:
+            #     pass
             # grad_weight.mul_(torch.rand_like(scaled_w))
             
             # grad_weight.mul_(_advanced_differentiable_quantize_derivative(scaled_w, k=5, level_format='e2m1', nan_existed=False, ste_smooth_alpha=0.5))

@@ -8,8 +8,7 @@ import torch
 import time
 from typing import Literal
 
-from msamp.common.dtype import Dtypes, Floating
-from msamp.common.tensor import ScalingTensor, ScalingMeta
+from msamp.common.tensor import ScalingMeta
 
 import msamp_my_quant
 
@@ -17,17 +16,14 @@ import msamp_my_quant
 class FP4_QUANT:
     """FP4 Quantization operator."""
     @staticmethod
-    def apply_DGE_item(
-        input_tensor: torch.Tensor,
-        k: float = 3.0,
-        power_clamp_max: float = 3.0
-    ) -> torch.Tensor:
+    def apply_DGE_item(input_tensor: torch.Tensor) -> torch.Tensor:
         """Apply DGE item to input tensor. Note that this function is fixed to E2M1 format with no NaN.
 
         Args:
             input (torch.Tensor): input tensor.
-            k (float): parameter k to determine the sharpness of the differentiable quantization estimator.
-            power_clamp_max (float): parameter power_clamp_max to restrict the amplitude of the estimated gradient.
+            Abandoned: [fix k and power_clamp_max to 3.0]
+            - k (float): parameter k to determine the sharpness of the differentiable quantization estimator.
+            - power_clamp_max (float): parameter power_clamp_max to restrict the amplitude of the estimated gradient.
 
         Returns:
             torch.Tensor: output tensor.
@@ -38,7 +34,7 @@ class FP4_QUANT:
             raise ValueError('The input tensor is not in bfloat16.')
         
         output_tensor = torch.zeros_like(input_tensor)
-        msamp_my_quant.launch_differentiable_quantize_derivative(input_tensor, output_tensor, k, power_clamp_max, torch.numel(input_tensor))
+        msamp_my_quant.launch_differentiable_quantize_derivative(input_tensor, output_tensor, torch.numel(input_tensor))
         return output_tensor
     
     
@@ -59,26 +55,24 @@ class FP4_QUANT:
 
         if channel_wise:
             # 计算每个通道的上限和下限分位数
-            lower_bound = torch.quantile(float_input, 1 - clip_threshold, dim=0, keepdim=True)
-            upper_bound = torch.quantile(float_input, clip_threshold, dim=0, keepdim=True)
-            # lower_bound, upper_bound = torch.quantile(
-            #     input=float_input,
-            #     q=torch.tensor([1 - clip_threshold, clip_threshold]).cuda(),
-            #     dim=0,
-            #     keepdim=True,
-            # )
+            sorted_tensor = torch.sort(input, dim=0).values
+            lower_index = int((1 - clip_threshold) * sorted_tensor.size(0))
+            upper_index = int(clip_threshold * sorted_tensor.size(0))
+            
+            lower_bound = sorted_tensor[lower_index:lower_index+1, :]
+            upper_bound = sorted_tensor[upper_index:upper_index+1, :]
+            
             output = torch.clamp(input, min=lower_bound, max=upper_bound)
         
         elif token_wise:
             # 计算每个 token 的上限和下限分位数
-            lower_bound = torch.quantile(float_input, 1 - clip_threshold, dim=1, keepdim=True)
-            upper_bound = torch.quantile(float_input, clip_threshold, dim=1, keepdim=True)
-            # lower_bound, upper_bound = torch.quantile(
-            #     input=float_input,
-            #     q=torch.tensor([1 - clip_threshold, clip_threshold]).cuda(),
-            #     dim=0,
-            #     keepdim=True,
-            # )
+            sorted_tensor = torch.sort(input, dim=1).values
+            lower_index = int((1 - clip_threshold) * sorted_tensor.size(1))
+            upper_index = int(clip_threshold * sorted_tensor.size(1))
+            
+            lower_bound = sorted_tensor[:, lower_index:lower_index+1]
+            upper_bound = sorted_tensor[:, upper_index:upper_index+1]
+            
             output = torch.clamp(input, min=lower_bound, max=upper_bound)
 
         else:
@@ -161,13 +155,13 @@ class FP4_QUANT:
         # get amax
         if channel_wise:
             amax = input_tensor.abs().max(dim=0, keepdim=True)[0]      # channel-wise max value
-            scale = torch.ones((1, 1), dtype=torch.bfloat16, device='cuda')     # 2-D tensor shape
+            scale = torch.ones((1, 1), dtype=input_tensor.dtype, device='cuda')     # 2-D tensor shape
         elif token_wise:
             amax = input_tensor.abs().max(dim=1, keepdim=True)[0]      # token-wise max value
-            scale = torch.ones((1, 1), dtype=torch.bfloat16, device='cuda')     # 2-D tensor shape
+            scale = torch.ones((1, 1), dtype=input_tensor.dtype, device='cuda')     # 2-D tensor shape
         else:
             amax = input_tensor.abs().max()
-            scale = torch.ones((), dtype=torch.bfloat16, device='cuda')
+            scale = torch.ones((), dtype=input_tensor.dtype, device='cuda')
         # compute scaling factor
         # fp_max = Floating._get_fp_max(exp=2, man=1, inf_existed=False, nan_existed=False)     # fixed
         fp_max = 6.0 if format == 'e2m1' else 7.0       # for e1m2, actually it is 3.5, but we *2 for directly round()
