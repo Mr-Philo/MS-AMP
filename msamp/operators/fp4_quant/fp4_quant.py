@@ -76,24 +76,15 @@ class FP4_QUANT:
             output = torch.clamp(input, min=lower_bound, max=upper_bound)
 
         else:
-            raise NotImplementedError("Now quantile clipping only support channel_wise or token_wise quantization.")
-            try:
-                # 计算整个张量的上限和下限分位数
-                lower_bound = torch.quantile(float_input, 1 - clip_threshold)
-                upper_bound = torch.quantile(float_input, clip_threshold)
-            except RuntimeError:
-                # 使用分块计算分位数以处理大张量
-                if debug_info:
-                    print(f"Input tensor is too large, using chunk-wise quantile to compute clipping threshold.")
-                chunk_size = 1e7  # 10M
-                quantiles = []
-                for i in range(0, input.numel(), int(chunk_size)):
-                    chunk = float_input.view(-1)[i: i + int(chunk_size)]
-                    quantiles.append(torch.quantile(chunk, torch.tensor([1 - clip_threshold, clip_threshold]).to(chunk.device)))
-                quantiles_tensor = torch.stack(quantiles)
-                lower_bound = quantiles_tensor[:, 0].min()
-                upper_bound = quantiles_tensor[:, 1].max()
+            sorted_tensor = torch.sort(float_input.view(-1))[0]
+            lower_index = int((1 - clip_threshold) * sorted_tensor.size(0))
+            upper_index = int(clip_threshold * sorted_tensor.size(0))
+            
+            lower_bound = sorted_tensor[lower_index:lower_index+1]
+            upper_bound = sorted_tensor[upper_index:upper_index+1]
+            
             output = torch.clamp(input, min=lower_bound, max=upper_bound)
+            
         if debug_info:
             print(f"time for clipping {input.numel()} elements: {time.time() - time0}, computed quantiles: {lower_bound, upper_bound}")
 
