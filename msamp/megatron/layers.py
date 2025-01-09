@@ -81,8 +81,8 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             # "e1m2_clip_0.97_compensation": {"format": "e1m2", "token_wise": True, "outlier_clip": True, "clip_threshold": 0.97, "nan_existed": False, "residual_compensation": True},
             # "e1m2_clip_0.97_compensation": {"format": "e1m2", "token_wise": False, "outlier_clip": True, "clip_threshold": 0.97, "nan_existed": False, "residual_compensation": True},
             # "e1m2_clip_0.97_compensation": {"format": "e2m1", "token_wise": True, "outlier_clip": False, "nan_existed": False},
-            # "e1m2_clip_0.97_compensation": {"format": "e2m1", "token_wise": False, "outlier_clip": False, "nan_existed": False},
-            "e1m2_clip_0.97_compensation": {"format": "e2m1", "token_wise": False, "outlier_clip": True, "nan_existed": False, "clip_threshold": 0.999},
+            "e1m2_clip_0.97_compensation": {"format": "e2m1", "token_wise": False, "outlier_clip": False, "nan_existed": False},
+            # "e1m2_clip_0.97_compensation": {"format": "e2m1", "token_wise": False, "outlier_clip": True, "nan_existed": False, "clip_threshold": 0.999},
             # -------------------------------------
             "e1m2_clip_0.99_compensation": {"format": "e1m2", "token_wise": True, "outlier_clip": True, "clip_threshold": 0.99, "nan_existed": False, "residual_compensation": True},
             "e1m2_clip_0.97_compensation_gemm": {"format": "e1m2", "token_wise": True, "outlier_clip": True, "clip_threshold": 0.97, "nan_existed": False, "residual_compensation": False, "return_residual": True},
