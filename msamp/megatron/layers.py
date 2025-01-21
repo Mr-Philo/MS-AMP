@@ -451,7 +451,8 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             # grad_weight.mul_((_differentiable_quantize_derivative(scaled_w, k=k, level_format='e2m1', nan_existed=False, using_scaled_k=True) + torch.ones_like(scaled_w))/2)
             # time0 = time.time()
             # grad_weight.mul_(torch.randn(size=scaled_w.size(), device=scaled_w.device, dtype=torch.float32))
-            grad_weight.mul_(_differentiable_quantize_derivative(scaled_w))
+            k = 5.0
+            grad_weight.mul_(_differentiable_quantize_derivative(scaled_w, k=k, power_clamp_max=3.0))
             # print(f"python side time: {time.time()-time0}")
             # start = time.perf_counter()
             # while time.perf_counter() - start < 2e-4:

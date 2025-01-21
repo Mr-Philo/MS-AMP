@@ -16,7 +16,11 @@ import msamp_my_quant
 class FP4_QUANT:
     """FP4 Quantization operator."""
     @staticmethod
-    def apply_DGE_item(input_tensor: torch.Tensor) -> torch.Tensor:
+    def apply_DGE_item(
+        input_tensor: torch.Tensor,
+        k: float = 3.0,
+        power_clamp_max: float = 3.0
+    ) -> torch.Tensor:
         """Apply DGE item to input tensor. Note that this function is fixed to E2M1 format with no NaN.
 
         Args:
@@ -34,7 +38,7 @@ class FP4_QUANT:
             raise ValueError('The input tensor is not in bfloat16.')
         
         output_tensor = torch.zeros_like(input_tensor)
-        msamp_my_quant.launch_differentiable_quantize_derivative(input_tensor, output_tensor, torch.numel(input_tensor))
+        msamp_my_quant.launch_differentiable_quantize_derivative(input_tensor, output_tensor, k, power_clamp_max, torch.numel(input_tensor))
         return output_tensor
     
     
