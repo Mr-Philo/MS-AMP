@@ -158,9 +158,9 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
                 raise NotImplementedError("Not recommended to use different quantize compensation scheme for backward yet.")
                 fp4_weight_in_float, weight_residual = _simu_cast_to_fp4(weight.bfloat16(), format='e2m1', channel_wise=True, outlier_clip=True, clip_threshold=0.95, nan_existed=False, residual_compensation=False, return_residual=True)
             elif USE_W_DIFFERENTIABLE_GRADIENT_ESTIMATOR:
-                fp4_weight_in_float, scaled_w = _simu_cast_to_fp4(weight.bfloat16(), format='e2m1', nan_existed=False, channel_wise=True, return_scaled_input_for_bwd=True)
+                fp4_weight_in_float, scaled_w = _simu_cast_to_fp4(weight.bfloat16(), format='e2m1', nan_existed=False, channel_wise=False, return_scaled_input_for_bwd=True)
             else:
-                fp4_weight_in_float = _simu_cast_to_fp4(weight.bfloat16(), format='e2m1', nan_existed=False, channel_wise=True)
+                fp4_weight_in_float = _simu_cast_to_fp4(weight.bfloat16(), format='e2m1', nan_existed=False, channel_wise=False)
             
             weight_fp8 = fp4_weight_in_float.cast(Dtypes.kfloat8_e4m3)
             if USE_W_BACKWARD_SIMU_FP4:
