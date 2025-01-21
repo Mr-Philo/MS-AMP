@@ -91,7 +91,7 @@ __device__ float power_derivative_delta05(float x){
 // 计算可微幂近似函数的导数的CUDA核函数
 // 量化区间固定为[-6.0, -4.0, -3.0, -2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]，即E2M1_no_NaN
 __global__ void differentiable_quantize_derivative(
-    const __nv_bfloat16* input, __nv_bfloat16* output
+    const __nv_bfloat16* input, __nv_bfloat16* output,
     float k, float power_clamp_max, int n
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
