@@ -79,8 +79,8 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         
         a_fp4_args = {
             # "e1m2_clip_0.97_compensation": {"format": "e1m2", "token_wise": True, "outlier_clip": True, "clip_threshold": 0.97, "nan_existed": False, "residual_compensation": True},
-            # "e1m2_clip_0.97_compensation": {"format": "e1m2", "token_wise": True, "outlier_clip": True, "clip_threshold": 0.99, "nan_existed": False, "residual_compensation": True},
-            "e1m2_clip_0.97_compensation": {"format": "e2m1", "token_wise": True, "outlier_clip": True, "clip_threshold": 0.999, "nan_existed": False, "residual_compensation": True},
+            # "e1m2_clip_0.97_compensation": {"format": "e1m2", "token_wise": False, "outlier_clip": True, "clip_threshold": 0.99, "nan_existed": False, "residual_compensation": True},
+            "e1m2_clip_0.97_compensation": {"format": "e2m1", "token_wise": False, "outlier_clip": True, "clip_threshold": 0.999, "nan_existed": False, "residual_compensation": True},
             # "e1m2_clip_0.97_compensation": {"format": "e1m2", "token_wise": False, "outlier_clip": True, "clip_threshold": 0.97, "nan_existed": False, "residual_compensation": True},
             # "e1m2_clip_0.97_compensation": {"format": "e2m1", "token_wise": True, "outlier_clip": False, "nan_existed": False},
             # "e1m2_clip_0.97_compensation": {"format": "e2m1", "token_wise": False, "outlier_clip": False, "nan_existed": False},
@@ -451,7 +451,7 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
             # grad_weight.mul_((_differentiable_quantize_derivative(scaled_w, k=k, level_format='e2m1', nan_existed=False, using_scaled_k=True) + torch.ones_like(scaled_w))/2)
             # time0 = time.time()
             # grad_weight.mul_(torch.randn(size=scaled_w.size(), device=scaled_w.device, dtype=torch.float32))
-            k = 5.0
+            k = 10
             grad_weight.mul_(_differentiable_quantize_derivative(scaled_w, k=k, power_clamp_max=3.0))
             # print(f"python side time: {time.time()-time0}")
             # start = time.perf_counter()
