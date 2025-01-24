@@ -78,11 +78,11 @@ class FP8LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function
         ], f"Unsupported fp4_quantize_scheme: {fp4_quantize_scheme}"
         
         a_fp4_args = {
-            "e1m2_clip_0.97_compensation": {"format": "e1m2", "token_wise": True, "outlier_clip": True, "clip_threshold": 0.97, "nan_existed": False, "residual_compensation": True},
+            # "e1m2_clip_0.97_compensation": {"format": "e1m2", "token_wise": True, "outlier_clip": True, "clip_threshold": 0.97, "nan_existed": False, "residual_compensation": True},
             # "e1m2_clip_0.97_compensation": {"format": "e1m2", "token_wise": False, "outlier_clip": True, "clip_threshold": 0.99, "nan_existed": False, "residual_compensation": True},
             # "e1m2_clip_0.97_compensation": {"format": "e2m1", "token_wise": False, "outlier_clip": True, "clip_threshold": 0.999, "nan_existed": False, "residual_compensation": True},
             # "e1m2_clip_0.97_compensation": {"format": "e1m2", "token_wise": False, "outlier_clip": True, "clip_threshold": 0.97, "nan_existed": False, "residual_compensation": True},
-            # "e1m2_clip_0.97_compensation": {"format": "e2m1", "token_wise": True, "outlier_clip": False, "nan_existed": False},
+            "e1m2_clip_0.97_compensation": {"format": "e2m1", "token_wise": True, "outlier_clip": False, "nan_existed": False},
             # "e1m2_clip_0.97_compensation": {"format": "e2m1", "token_wise": False, "outlier_clip": False, "nan_existed": False},
             # "e1m2_clip_0.97_compensation": {"format": "e2m1", "token_wise": False, "outlier_clip": True, "nan_existed": False, "clip_threshold": 0.999},
             # -------------------------------------
